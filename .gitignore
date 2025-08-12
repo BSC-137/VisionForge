@@ -1,27 +1,45 @@
-```gitignore
-# Build artifacts
-/build/
-/out/
-/bin/
-/lib/
-/obj/
-/*.o
-/*.a
-/*.so
-/*.exe
+# Build folders
+build/
+out/
 
-# OS-specific
-.DS_Store
-Thumbs.db
+# Compiled object files
+*.o
+*.obj
+*.lo
+*.la
+*.al
+*.libs
 
-# IDE-specific
-.vscode/
-.idea/
+# Compiled binary executables
+*.exe
+*.out
+*.app
+visionforge
 
-# Logs & temp files
-*.log
-*.tmp
+# Shared libraries
+*.so
+*.so.*
+*.dylib
+*.dll
 
-# Image outputs
+# PPM/EXR images
 *.ppm
 *.exr
+
+# Logs
+*.log
+
+# IDE / editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# CMake cache
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Misc
+*.tmp
