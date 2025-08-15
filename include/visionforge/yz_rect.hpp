@@ -36,4 +36,13 @@ public:
         out_box = AABB(Vec3(k - THICK, y0, z0), Vec3(k + THICK, y1, z1));
         return true;
     }
+
+    // --- add these two for direct-light sampling ---
+    Vec3 light_normal() const { return Vec3(1,0,0); } // +X (from -X wall toward +X)
+    Vec3 sample_point() const {
+        double y = random_double(y0, y1);
+        double z = random_double(z0, z1);
+        return Vec3(k, y, z);
+    }
+
 };

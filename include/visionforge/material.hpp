@@ -1,8 +1,9 @@
 #pragma once
 #include "ray.hpp"
 #include "hittable.hpp"
+#include <memory>  // for enable_shared_from_this
 
-class Material {
+class Material : public std::enable_shared_from_this<Material> {
 public:
     // BRDF sampling
     virtual bool scatter(const Ray& r_in, const HitRecord& rec,
