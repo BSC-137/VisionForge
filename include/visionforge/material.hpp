@@ -10,7 +10,8 @@ public:
                          Vec3& attenuation, Ray& scattered) const = 0;
 
     // Emission (radiance, W·sr^-1·m^-2); default = black
-    virtual Vec3 emitted(const HitRecord& rec) const { return Vec3(0,0,0); }
+    virtual Vec3 emitted(const HitRecord&) const { return Vec3(0,0,0); }
+
 
     virtual ~Material() = default;
 };

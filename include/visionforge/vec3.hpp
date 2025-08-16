@@ -80,4 +80,12 @@ inline Vec3 refract(const Vec3& uv, const Vec3& n, double etai_over_etat){
     return r_out_perp + r_out_par;
 }
 
+// ---------- component-wise helpers ----------
+inline Vec3 min_vec(const Vec3& a, const Vec3& b) {
+    return Vec3(std::fmin(a.x, b.x), std::fmin(a.y, b.y), std::fmin(a.z, b.z));
+}
+inline Vec3 max_vec(const Vec3& a, const Vec3& b) {
+    return Vec3(std::fmax(a.x, b.x), std::fmax(a.y, b.y), std::fmax(a.z, b.z));
+}
+
 #endif
