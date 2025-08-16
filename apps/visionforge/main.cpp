@@ -29,7 +29,6 @@
 #include "visionforge/perlin.hpp"
 #include "visionforge/aabb.hpp"
 
-// NEW: modular sky + bbox helpers
 #include "visionforge/sky.hpp"
 #include "visionforge/bbox.hpp"
 
