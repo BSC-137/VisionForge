@@ -55,6 +55,9 @@ static const double SHUTTER  = 1.0/30.0;
 static const int    ISO      = 400;
 static const double EXPOSURE_COMP = 6.5;
 
+// Only for the visible background (primary rays). Does NOT affect lighting.
+static const double SKY_VIEW_GAIN = 28.0;
+
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
@@ -346,14 +349,20 @@ template<typename RectT>
 Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int depth, int max_depth){
     if (depth <= 0) return Vec3(0,0,0);
     HitRecord rec;
+
+    // Miss: bright sky only for primary rays; black for secondary (keeps lighting unchanged)
     if (!world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
-        return g_sky.eval(normalize(r.direction));
+        if (depth == max_depth) {
+            return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
+        } else {
+            return Vec3(0,0,0);
+        }
     }
 
-    // Hide emissive rectangles from primary (camera) rays so the sky shows.
+    // Hide emissive rectangles from primary rays so the sky shows behind it
     if (depth == max_depth) {
         if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr) {
-            return g_sky.eval(normalize(r.direction));
+            return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
         }
     }
 
@@ -461,7 +470,7 @@ int main(){
     auto blu_m  = std::make_shared<Lambertian>(Vec3(0.18, 0.55, 0.95));
     auto grn_m  = std::make_shared<Lambertian>(Vec3(0.22, 0.84, 0.25));
     auto wht_m  = std::make_shared<Lambertian>(Vec3(0.85, 0.85, 0.85));
-    auto sun    = std::make_shared<DiffuseLight>(Vec3(1.0, 0.98, 0.92), 8000.0);
+    auto sun    = std::make_shared<DiffuseLight>(Vec3(1.0, 0.98, 0.92), 8000.0); // original intensity
 
     // Terrain
     const double XMIN=-22, XMAX=22, ZMIN=-22, ZMAX=22;
