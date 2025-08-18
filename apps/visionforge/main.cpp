@@ -38,12 +38,13 @@ static const int    WIDTH   = 1280;
 static const int    HEIGHT  = 720;
 
 static const int  SPP_PREVIEW = 12;
-static const int  SPP_FINAL   = 96;
+static const int  SPP_FINAL   = 96;    // overall samples per pixel
 static const int  MAX_DEPTH_PREVIEW = 6;
 static const int  MAX_DEPTH_FINAL   = 16;
 
-static const int  LIGHT_SAMPLES_PREVIEW = 1;
-static const int  LIGHT_SAMPLES_FINAL   = 1;
+// More direct-light samples for cleaner, soft shadows
+static const int  LIGHT_SAMPLES_PREVIEW = 2;
+static const int  LIGHT_SAMPLES_FINAL   = 6;
 
 // Adaptive sampling
 static const int    MIN_SPP = 6;
@@ -55,8 +56,8 @@ static const double SHUTTER  = 1.0/30.0;
 static const int    ISO      = 400;
 static const double EXPOSURE_COMP = 6.5;
 
-// Only for the visible background (primary rays). Does NOT affect lighting.
-static const double SKY_VIEW_GAIN = 28.0;
+// CAMERA background only (does NOT affect lighting)
+static const double SKY_VIEW_GAIN = 68.0;
 
 #ifndef PI
 #define PI 3.14159265358979323846
@@ -182,7 +183,7 @@ public:
     bool bounding_box(AABB& out_box) const override { out_box = box; return true; }
 };
 
-// ====================== Triangle mesh piece (per-vertex normals) ======================
+// ====================== Triangle (per-vertex normals) ======================
 class Triangle : public Hittable {
 public:
     Vec3 p0, p1, p2, n0, n1, n2;
@@ -281,7 +282,6 @@ struct HeightField {
         Vec3 tx(dx,hx,0), tz(0,hz,dz); return normalize(cross(tz,tx));
     }
 
-    // Carve a shallow footprint + rim at (x0,z0)
     void carve_footprint(double x0, double z0, double edge, double sink, double rim_amp){
         double r = 0.6 * edge;
         double r2 = r*r;
@@ -292,11 +292,9 @@ struct HeightField {
                 double x = xmin + (xmax-xmin)*(double(i)/nx);
                 double dx=x-x0, dz=z-z0; double d2=dx*dx+dz*dz;
                 if (d2 > r_out*r_out) continue;
-
                 double depress = sink * std::exp(-(d2)/(2.0*r2));
                 double ring = std::exp(-std::pow((std::sqrt(d2)/r - 1.1)/0.18, 2.0));
                 double berm = rim_amp * ring;
-
                 h[idx(i,k)] -= depress;
                 h[idx(i,k)] += berm;
             }
@@ -335,12 +333,9 @@ static std::shared_ptr<Lambertian> sand_ptr; // identity check
 // ====================== Sky model ======================
 static Sky g_sky(/*sun_az_deg=*/300.0, /*sun_elev_deg=*/12.0, /*turbidity=*/3.5);
 
-// Helper: expose albedo if the material is Lambertian
+// Helper
 static inline bool get_lambert_albedo(const std::shared_ptr<Material>& m, Vec3& out_albedo) {
-    if (auto* lam = dynamic_cast<Lambertian*>(m.get())) {
-        out_albedo = lam->albedo;
-        return true;
-    }
+    if (auto* lam = dynamic_cast<Lambertian*>(m.get())) { out_albedo = lam->albedo; return true; }
     return false;
 }
 
@@ -350,23 +345,19 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
     if (depth <= 0) return Vec3(0,0,0);
     HitRecord rec;
 
-    // Miss: bright sky only for primary rays; black for secondary (keeps lighting unchanged)
+    // Miss: bright sky only for primary rays
     if (!world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
-        if (depth == max_depth) {
-            return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
-        } else {
-            return Vec3(0,0,0);
-        }
+        if (depth == max_depth) return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
+        return Vec3(0,0,0);
     }
 
-    // Hide emissive rectangles from primary rays so the sky shows behind it
+    // Hide emissive rectangles from primary camera rays so the sky shows
     if (depth == max_depth) {
-        if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr) {
+        if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr)
             return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
-        }
     }
 
-    // Micro-normal perturb just for sand
+    // Sand bumps
     if (rec.mat == sand_ptr) {
         Vec3 g = g_bump.grad(rec.point * BUMP_FREQ);
         g = g - rec.normal * dot(g, rec.normal);
@@ -382,7 +373,7 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
 
     if (depth < max_depth - 4) {
         double p = std::max({attenuation.x, attenuation.y, attenuation.z});
-        p = std::max(0.05, clamp01(p));
+        p = std::max(0.05, std::min(1.0, p));
         if (random_double() > p) return emitted;
         attenuation /= p;
     }
@@ -460,7 +451,7 @@ int main(){
     double focus_dist = (lookfrom - lookat).length();
     Camera cam(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect, 0.0, focus_dist, 0.0, 1.0);
 
-    // BBox projector basis (from bbox.hpp)
+    // BBox projector basis
     CameraBasis camBasis = make_camera_basis(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect);
 
     // Materials
@@ -470,21 +461,24 @@ int main(){
     auto blu_m  = std::make_shared<Lambertian>(Vec3(0.18, 0.55, 0.95));
     auto grn_m  = std::make_shared<Lambertian>(Vec3(0.22, 0.84, 0.25));
     auto wht_m  = std::make_shared<Lambertian>(Vec3(0.85, 0.85, 0.85));
-    auto sun    = std::make_shared<DiffuseLight>(Vec3(1.0, 0.98, 0.92), 8000.0); // original intensity
+    auto sun    = std::make_shared<DiffuseLight>(Vec3(1.0, 0.98, 0.92), 8000.0);
 
     // Terrain
     const double XMIN=-22, XMAX=22, ZMIN=-22, ZMAX=22;
     const int NX = 96, NZ = 96;
-    HeightField hf(XMIN, XMAX, ZMIN, ZMAX, NX, NZ, /*amp=*/1.8, /*scale=*/0.14, /*seed=*/1337);
+    HeightField hf(XMIN, XMAX, ZMIN, ZMAX, NX, NZ, 1.8, 0.14, 1337);
     hf.generate();
 
     HittableList objects;
 
-    // Side "sun"
+    // Side "sun" (large area for soft shadows)
     auto rect_light = std::make_shared<YZRect>( 2.0, 14.0, -25.0, 25.0, -30.0, sun);
     objects.add(rect_light);
 
-    // FIXED CUBES (RGBW) — embedded & tilted
+    // Align visible sky sun with the lighting direction
+    g_sky.set_sun_from_dir(rect_light->light_normal());
+
+    // Fixed RGBW cubes
     struct CubeSpec { Vec3 center; double edge; const char* label; };
     const double base_edge = 1.6;
     std::vector<CubeSpec> specs = {
@@ -499,23 +493,21 @@ int main(){
     std::uniform_real_distribution<double> sink_ratio_rng(0.08, 0.22);
 
     std::vector<CubePose> cubes; cubes.reserve(specs.size());
-
     for (auto& s : specs) {
         double sink_ratio = sink_ratio_rng(rng);
         double y_ground = hf.height_at(s.center.x, s.center.z);
         double y = y_ground + (1.0 - sink_ratio) * (s.edge*0.5);
         Vec3 c(s.center.x, y, s.center.z);
 
-        hf.carve_footprint(c.x, c.z, s.edge,
-                           /*sink=*/sink_ratio * s.edge,
-                           /*rim_amp=*/0.10 * s.edge);
+        hf.carve_footprint(c.x, c.z, s.edge, sink_ratio * s.edge, 0.10 * s.edge);
 
-        auto mat = (std::string(s.label)=="red")?red_m: (std::string(s.label)=="green")?grn_m:
+        auto mat = (std::string(s.label)=="red")?red_m:
+                   (std::string(s.label)=="green")?grn_m:
                    (std::string(s.label)=="blue")?blu_m:wht_m;
         auto cube = make_unit_cube(Vec3(0,0,0), s.edge, mat);
 
-        double roll  = tilt_deg(rng);  // Z
-        double pitch = tilt_deg(rng);  // X
+        double roll  = tilt_deg(rng);
+        double pitch = tilt_deg(rng);
         std::shared_ptr<Hittable> tilted = std::make_shared<RotateZ>(cube, roll);
         tilted = std::make_shared<RotateX>(tilted, pitch);
         tilted = std::make_shared<Translate>(tilted, c);
@@ -524,7 +516,7 @@ int main(){
         cubes.push_back(CubePose{c, s.edge, roll, pitch, s.label});
     }
 
-    // Tessellate deformed sand
+    // Tessellate sand
     hf.to_triangles(objects, sand);
 
     // BVH
@@ -571,7 +563,7 @@ int main(){
         }
     }
 
-    // 2D bounding boxes (drawn in yellow) — from bbox.hpp
+    // 2D bounding boxes
     std::vector<Box2D> boxes; boxes.reserve(cubes.size());
     for (auto& pose : cubes){
         Box2D b = cube_bbox_screen_rot(camBasis, pose, width, height);
@@ -587,7 +579,7 @@ int main(){
     file.write(reinterpret_cast<const char*>(fb.data()), fb.size());
     std::cout << "Wrote ../out/image.ppm\n";
 
-    // Write annotations (CSV + JSON)
+    // CSV
     {
         std::ofstream c("../out/bboxes.csv");
         c << "label,xmin,ymin,xmax,ymax,width,height\n";
@@ -597,6 +589,7 @@ int main(){
         }
         std::cout << "Wrote ../out/bboxes.csv\n";
     }
+    // JSON
     {
         std::ofstream j("../out/bboxes.json");
         j << std::fixed << std::setprecision(0);
