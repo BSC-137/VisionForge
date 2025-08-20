@@ -1,6 +1,7 @@
 # Build folders
 build/
 out/
+/dist/
 
 # Compiled object files
 *.o

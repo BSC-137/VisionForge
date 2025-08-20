@@ -1,17 +1,18 @@
-// ===== VisionForge — Procedural Desert (dunes + RGBW cubes with tight bboxes) =====
-#include <cmath>
-#include <ctime>
-#include <fstream>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <cstdlib>
+// VisionForge — CLI wrapper around your procedural desert demo
+// Flags: --out, --width, --height, --spp, --max-depth, --seed, --preview
+// Writes: <out>/image.ppm, bboxes.{csv,json}, manifest.json
+
+#include <string>
 #include <vector>
 #include <filesystem>
-#include <random>
-#include <string>
+#include <fstream>
+#include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
+#include <cstdlib>
+#include <random>
+#include <cmath>
 #include <algorithm>
 
 #include "visionforge/vec3.hpp"
@@ -29,56 +30,66 @@
 #include "visionforge/perlin.hpp"
 #include "visionforge/aabb.hpp"
 
-#include "visionforge/sky.hpp"
-#include "visionforge/bbox.hpp"
+#include "visionforge/sky.hpp"    // your sky model
+#include "visionforge/bbox.hpp"   // cube_bbox_screen_rot, draw_rect, Box2D, CubePose, CameraBasis
 
-// ------------ CONFIG ------------
-static const bool   PREVIEW = false;
-static const int    WIDTH   = 1280;
-static const int    HEIGHT  = 720;
+// ---------- tiny CLI ----------
+struct Opts {
+    std::string out = "out";
+    int width = 1280;
+    int height = 720;
+    int spp = 96;
+    int max_depth = 16;
+    unsigned seed = 1337;
+    bool preview = false;
+};
 
-static const int  SPP_PREVIEW = 12;
-static const int  SPP_FINAL   = 96;    // overall samples per pixel
-static const int  MAX_DEPTH_PREVIEW = 6;
-static const int  MAX_DEPTH_FINAL   = 16;
+static void print_usage() {
+    std::cout <<
+R"(VisionForge — procedural desert demo
 
-// More direct-light samples for cleaner, soft shadows
-static const int  LIGHT_SAMPLES_PREVIEW = 2;
-static const int  LIGHT_SAMPLES_FINAL   = 6;
+Usage:
+  visionforge [--out DIR] [--width W] [--height H] [--spp N]
+              [--max-depth N] [--seed S] [--preview] [--help]
 
-// Adaptive sampling
-static const int    MIN_SPP = 6;
-static const double REL_NOISE_TARGET = 0.020;
+Flags:
+  --out DIR         Output directory (default: out)
+  --width W         Image width (default: 1280)
+  --height H        Image height (default: 720)
+  --spp N           Target samples per pixel (default: 96)
+  --max-depth N     Path depth (default: 16)
+  --seed S          RNG seed for scene & sampling (default: 1337)
+  --preview         Use preview balances (lighter sampling)
+  --help            Show this help
+)";
+}
 
-// Exposure
-static const double F_NUMBER = 2.0;
-static const double SHUTTER  = 1.0/30.0;
-static const int    ISO      = 400;
-static const double EXPOSURE_COMP = 6.5;
+static Opts parse(int argc, char** argv) {
+    Opts o;
+    auto need = [&](int &i){ if (i+1>=argc) { print_usage(); std::exit(2);} return ++i; };
+    for (int i=1;i<argc;++i) {
+        std::string a(argv[i]);
+        if      (a=="--out")        o.out = argv[need(i)];
+        else if (a=="--width")      o.width = std::stoi(argv[need(i)]);
+        else if (a=="--height")     o.height = std::stoi(argv[need(i)]);
+        else if (a=="--spp")        o.spp = std::stoi(argv[need(i)]);
+        else if (a=="--max-depth")  o.max_depth = std::stoi(argv[need(i)]);
+        else if (a=="--seed")       o.seed = static_cast<unsigned>(std::stoul(argv[need(i)]));
+        else if (a=="--preview")    o.preview = true;
+        else if (a=="--help" || a=="-h") { print_usage(); std::exit(0); }
+        else { std::cerr << "Unknown flag: " << a << "\n"; print_usage(); std::exit(2); }
+    }
+    std::filesystem::create_directories(o.out);
+    return o;
+}
 
-// CAMERA background only (does NOT affect lighting)
-static const double SKY_VIEW_GAIN = 68.0;
-
+static inline double clamp01(double x){ return x<0 ? 0 : (x>1 ? 1 : x); }
+static inline Vec3 clamp01(const Vec3& c){ return Vec3(clamp01(c.x),clamp01(c.y),clamp01(c.z)); }
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
 
-static inline double clamp01(double x){ return x<0 ? 0 : (x>1 ? 1 : x); }
-static inline Vec3 clamp01(const Vec3& c){ return Vec3(clamp01(c.x),clamp01(c.y),clamp01(c.z)); }
-static inline double exposure_scale(double fnum, double shutter_s, int iso){
-    double EV100 = std::log2((fnum*fnum)/shutter_s);
-    return 0.18 * std::pow(2.0, -EV100) * (100.0/double(iso));
-}
-static inline Vec3 aces_tonemap(const Vec3& c){
-    const double a=2.51,b=0.03,c2=2.43,d=0.59,e=0.14;
-    auto tm=[&](double x){ double num=x*(a*x+b), den=x*(c2*x+d)+e; return clamp01(num/den); };
-    return Vec3(tm(c.x), tm(c.y), tm(c.z));
-}
-static inline double luminance(const Vec3& c){
-    return 0.2126*c.x + 0.7152*c.y + 0.0722*c.z;
-}
-
-// ====================== Transform wrappers ======================
+// ---------- Transform wrappers (from your code) ----------
 class Translate : public Hittable {
 public:
     std::shared_ptr<Hittable> ptr;
@@ -183,13 +194,12 @@ public:
     bool bounding_box(AABB& out_box) const override { out_box = box; return true; }
 };
 
-// ====================== Triangle (per-vertex normals) ======================
+// ---------- Triangle + HeightField (from your code) ----------
 class Triangle : public Hittable {
 public:
     Vec3 p0, p1, p2, n0, n1, n2;
     std::shared_ptr<Material> mat;
     AABB box;
-
     Triangle()=default;
     Triangle(const Vec3& a,const Vec3& b,const Vec3& c,
              const Vec3& na,const Vec3& nb,const Vec3& nc,
@@ -227,7 +237,6 @@ public:
     bool bounding_box(AABB& out_box) const override{ out_box=box; return true; }
 };
 
-// ====================== HeightField (dunes) ======================
 struct HeightField {
     double xmin,xmax,zmin,zmax; int nx,nz; double amp,scale; vf::perlin noise;
     std::vector<double> h;
@@ -281,7 +290,6 @@ struct HeightField {
         double dx=(xmax-xmin)/nx, dz=(zmax-zmin)/nz;
         Vec3 tx(dx,hx,0), tz(0,hz,dz); return normalize(cross(tz,tx));
     }
-
     void carve_footprint(double x0, double z0, double edge, double sink, double rim_amp){
         double r = 0.6 * edge;
         double r2 = r*r;
@@ -300,7 +308,6 @@ struct HeightField {
             }
         }
     }
-
     void to_triangles(HittableList& out, const std::shared_ptr<Material>& m) const {
         for(int k=0;k<nz;++k){
             double z0=zmin+(zmax-zmin)*(double(k)/nz);
@@ -324,40 +331,45 @@ struct HeightField {
     }
 };
 
-// ====================== Sand micro bump ======================
+// ---------- Sand micro-bump (globals) ----------
 static vf::perlin g_bump(424242);
 static const double BUMP_FREQ  = 5.0;
 static const double BUMP_SCALE = 0.22;
-static std::shared_ptr<Lambertian> sand_ptr; // identity check
+static std::shared_ptr<Lambertian> sand_ptr; // to identify sand material
 
-// ====================== Sky model ======================
+// ---------- Sky (global) ----------
 static Sky g_sky(/*sun_az_deg=*/300.0, /*sun_elev_deg=*/12.0, /*turbidity=*/3.5);
 
-// Helper
+// ---------- helpers from your code ----------
 static inline bool get_lambert_albedo(const std::shared_ptr<Material>& m, Vec3& out_albedo) {
     if (auto* lam = dynamic_cast<Lambertian*>(m.get())) { out_albedo = lam->albedo; return true; }
     return false;
 }
 
-// ====================== Integrator (with light MIS) ======================
+// Note: random_double() is assumed available from your existing headers.
+
+// ---------- Integrator with area light sampling ----------
 template<typename RectT>
-Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int depth, int max_depth){
+Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int depth, int max_depth,
+               bool PREVIEW, int LIGHT_SAMPLES_PREVIEW, int LIGHT_SAMPLES_FINAL,
+               int MAX_DEPTH_PREVIEW, int MAX_DEPTH_FINAL, double SKY_VIEW_GAIN)
+{
     if (depth <= 0) return Vec3(0,0,0);
     HitRecord rec;
 
-    // Miss: bright sky only for primary rays
+    // Miss: visible sky for primary rays
     if (!world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
         if (depth == max_depth) return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
         return Vec3(0,0,0);
     }
 
-    // Hide emissive rectangles from primary camera rays so the sky shows
+    // Hide emissive rects from primary camera ray
     if (depth == max_depth) {
         if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr)
             return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
     }
 
-    // Sand bumps
+    // Micro bump on sand
     if (rec.mat == sand_ptr) {
         Vec3 g = g_bump.grad(rec.point * BUMP_FREQ);
         g = g - rec.normal * dot(g, rec.normal);
@@ -371,6 +383,7 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
 
     if (attenuation.x < 1e-3 && attenuation.y < 1e-3 && attenuation.z < 1e-3) return emitted;
 
+    // RR
     if (depth < max_depth - 4) {
         double p = std::max({attenuation.x, attenuation.y, attenuation.z});
         p = std::max(0.05, std::min(1.0, p));
@@ -378,7 +391,9 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
         attenuation /= p;
     }
 
-    Vec3 indirect = attenuation * ray_color(scattered, world, area_light, depth - 1, max_depth);
+    Vec3 indirect = attenuation * ray_color(scattered, world, area_light, depth - 1, max_depth,
+                                            PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                            MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN);
 
     Vec3 direct(0,0,0);
     Vec3 albedo;
@@ -417,7 +432,7 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
     return emitted + direct + indirect;
 }
 
-// ====================== Cube builder ======================
+// ---------- Cube builder ----------
 static std::shared_ptr<Hittable> make_unit_cube(const Vec3& c, double edge, const std::shared_ptr<Material>& m) {
     double h = edge * 0.5;
     double x0 = c.x - h, x1 = c.x + h;
@@ -433,52 +448,104 @@ static std::shared_ptr<Hittable> make_unit_cube(const Vec3& c, double edge, cons
     return list;
 }
 
-// ====================== Main ======================
-int main(){
-    srand((unsigned)time(0));
-    std::filesystem::create_directories("../out");
+// ---------- tonemap & exposure helpers ----------
+static inline double exposure_scale(double fnum, double shutter_s, int iso){
+    double EV100 = std::log2((fnum*fnum)/shutter_s);
+    return 0.18 * std::pow(2.0, -EV100) * (100.0/double(iso));
+}
+static inline Vec3 aces_tonemap(const Vec3& c){
+    const double a=2.51,b=0.03,c2=2.43,d=0.59,e=0.14;
+    auto tm=[&](double x){ double num=x*(a*x+b), den=x*(c2*x+d)+e; return clamp01(num/den); };
+    return Vec3(tm(c.x), tm(c.y), tm(c.z));
+}
+static inline double luminance(const Vec3& c){
+    return 0.2126*c.x + 0.7152*c.y + 0.0722*c.z;
+}
 
+// ---------- manifest ----------
+static void write_manifest(const std::string& outdir, const Opts& o,
+                           int actual_avg_spp, double seconds) {
+    std::ofstream j(outdir + "/manifest.json");
+    j << std::fixed << std::setprecision(3);
+    j << "{\n"
+      << "  \"tool\": \"VisionForge\",\n"
+      << "  \"width\": " << o.width << ",\n"
+      << "  \"height\": " << o.height << ",\n"
+      << "  \"spp_target\": " << o.spp << ",\n"
+      << "  \"spp_avg\": " << actual_avg_spp << ",\n"
+      << "  \"max_depth\": " << o.max_depth << ",\n"
+      << "  \"seed\": " << o.seed << ",\n"
+      << "  \"seconds\": " << seconds << "\n"
+      << "}\n";
+}
+
+// =====================================
+//                  MAIN
+// =====================================
+int main(int argc, char** argv) {
+    Opts o = parse(argc, argv);
+    std::srand(o.seed);
+
+    // render controls (replacing your old static CONFIG)
+    bool   PREVIEW = o.preview;
+    int    WIDTH   = o.width;
+    int    HEIGHT  = o.height;
+    int    SPP_PREVIEW = 12;
+    int    SPP_FINAL   = o.spp;
+    int    MAX_DEPTH_PREVIEW = 6;
+    int    MAX_DEPTH_FINAL   = o.max_depth;
+    int    LIGHT_SAMPLES_PREVIEW = 2;
+    int    LIGHT_SAMPLES_FINAL   = 6;
+    int    MIN_SPP = 6;
+    double REL_NOISE_TARGET = 0.020;
+
+    // exposure & preview sky intensity (same as your code)
+    double F_NUMBER = 2.0;
+    double SHUTTER  = 1.0/30.0;
+    int    ISO      = 400;
+    double EXPOSURE_COMP = 6.5;
+    double SKY_VIEW_GAIN = 68.0;
+
+    // image dims
     const int width  = WIDTH;
     const int height = HEIGHT;
     const int spp_target = PREVIEW ? SPP_PREVIEW : SPP_FINAL;
     const int max_depth  = PREVIEW ? MAX_DEPTH_PREVIEW : MAX_DEPTH_FINAL;
     const double aspect  = double(width)/double(height);
 
-    // Camera
+    // camera
     Vec3 lookfrom(18.0, 8.0, 24.0);
     Vec3 lookat  ( 0.0, 1.2,  0.0);
     double vfov_deg = 35.0;
     double focus_dist = (lookfrom - lookat).length();
     Camera cam(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect, 0.0, focus_dist, 0.0, 1.0);
-
-    // BBox projector basis
     CameraBasis camBasis = make_camera_basis(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect);
 
-    // Materials
+    // materials
     sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
     auto sand   = sand_ptr;
     auto red_m  = std::make_shared<Lambertian>(Vec3(0.90, 0.18, 0.14));
     auto blu_m  = std::make_shared<Lambertian>(Vec3(0.18, 0.55, 0.95));
     auto grn_m  = std::make_shared<Lambertian>(Vec3(0.22, 0.84, 0.25));
     auto wht_m  = std::make_shared<Lambertian>(Vec3(0.85, 0.85, 0.85));
-    auto sun    = std::make_shared<DiffuseLight>(Vec3(1.0, 0.98, 0.92), 8000.0);
+    auto sun_em = std::make_shared<DiffuseLight>(Vec3(1.0, 0.98, 0.92), 8000.0);
 
-    // Terrain
+    // terrain
     const double XMIN=-22, XMAX=22, ZMIN=-22, ZMAX=22;
     const int NX = 96, NZ = 96;
-    HeightField hf(XMIN, XMAX, ZMIN, ZMAX, NX, NZ, 1.8, 0.14, 1337);
+    HeightField hf(XMIN, XMAX, ZMIN, ZMAX, NX, NZ, 1.8, 0.14, /*seed*/1337);
     hf.generate();
 
     HittableList objects;
 
-    // Side "sun" (large area for soft shadows)
-    auto rect_light = std::make_shared<YZRect>( 2.0, 14.0, -25.0, 25.0, -30.0, sun);
+    // big side "sun" rectangle for soft shadows
+    auto rect_light = std::make_shared<YZRect>( 2.0, 14.0, -25.0, 25.0, -30.0, sun_em);
     objects.add(rect_light);
 
-    // Align visible sky sun with the lighting direction
+    // align visible sky sun to rect normal
     g_sky.set_sun_from_dir(rect_light->light_normal());
 
-    // Fixed RGBW cubes
+    // RGBW cubes (your exact layout)
     struct CubeSpec { Vec3 center; double edge; const char* label; };
     const double base_edge = 1.6;
     std::vector<CubeSpec> specs = {
@@ -488,7 +555,7 @@ int main(){
         { Vec3( 6.0, 0.0,  6.0), base_edge, "white" }
     };
 
-    std::mt19937 rng(1338);
+    std::mt19937 rng(o.seed ^ 0x9e3779b1);
     std::uniform_real_distribution<double> tilt_deg(-12.0, 12.0);
     std::uniform_real_distribution<double> sink_ratio_rng(0.08, 0.22);
 
@@ -516,20 +583,23 @@ int main(){
         cubes.push_back(CubePose{c, s.edge, roll, pitch, s.label});
     }
 
-    // Tessellate sand
+    // tessellate sand
     hf.to_triangles(objects, sand);
 
-    // BVH
+    // build BVH
     std::vector<std::shared_ptr<Hittable>> objs_vec = objects.objects;
     BVHNode world(objs_vec, 0, objs_vec.size());
 
-    // Framebuffer
+    // render
+    auto t0 = std::chrono::high_resolution_clock::now();
+
     std::vector<unsigned char> fb(width * height * 3, 0);
     double exposure = exposure_scale(F_NUMBER, SHUTTER, ISO) * EXPOSURE_COMP;
 
-    // Render
+    long long spp_accum = 0;
+
     #if defined(VF_USE_OMP)
-      #pragma omp parallel for schedule(dynamic, 1)
+      #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
     #endif
     for (int j = height - 1; j >= 0; --j) {
         for (int i = 0; i < width; ++i) {
@@ -540,7 +610,9 @@ int main(){
                 double u = (i + random_double()) / (width  - 1);
                 double v = (j + random_double()) / (height - 1);
                 Ray r = cam.get_ray(u, v);
-                Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth);
+                Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
+                                   PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                   MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN);
                 sum += c;
 
                 // adaptive stop
@@ -553,6 +625,8 @@ int main(){
                     if (ci95 < REL_NOISE_TARGET * std::max(1e-3, meanL)) break;
                 }
             }
+            spp_accum += (s+1);
+
             Vec3 pixel = (sum / double(s+1)) * exposure;
             Vec3 mapped = aces_tonemap(pixel);
             mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
@@ -563,7 +637,7 @@ int main(){
         }
     }
 
-    // 2D bounding boxes
+    // 2D bbox overlay (from your bbox.hpp helpers)
     std::vector<Box2D> boxes; boxes.reserve(cubes.size());
     for (auto& pose : cubes){
         Box2D b = cube_bbox_screen_rot(camBasis, pose, width, height);
@@ -573,25 +647,27 @@ int main(){
         draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
     }
 
-    // Write image
-    std::ofstream file("../out/image.ppm", std::ios::binary);
+    // write outputs
+    const std::string ppm  = o.out + "/image.ppm";
+    const std::string csv  = o.out + "/bboxes.csv";
+    const std::string json = o.out + "/bboxes.json";
+
+    std::ofstream file(ppm, std::ios::binary);
     file << "P6\n" << width << " " << height << "\n255\n";
     file.write(reinterpret_cast<const char*>(fb.data()), fb.size());
-    std::cout << "Wrote ../out/image.ppm\n";
+    std::cout << "Wrote " << ppm << "\n";
 
-    // CSV
     {
-        std::ofstream c("../out/bboxes.csv");
+        std::ofstream c(csv);
         c << "label,xmin,ymin,xmax,ymax,width,height\n";
         for (auto& b : boxes){
             c << b.label << "," << b.x0 << "," << b.y0 << "," << b.x1 << "," << b.y1
               << "," << width << "," << height << "\n";
         }
-        std::cout << "Wrote ../out/bboxes.csv\n";
+        std::cout << "Wrote " << csv << "\n";
     }
-    // JSON
     {
-        std::ofstream j("../out/bboxes.json");
+        std::ofstream j(json);
         j << std::fixed << std::setprecision(0);
         j << "{\n  \"image_width\": " << width << ",\n  \"image_height\": " << height << ",\n  \"boxes\": [\n";
         for (size_t i=0;i<boxes.size();++i){
@@ -602,7 +678,13 @@ int main(){
             j << "\n";
         }
         j << "  ]\n}\n";
-        std::cout << "Wrote ../out/bboxes.json\n";
+        std::cout << "Wrote " << json << "\n";
     }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double secs = std::chrono::duration<double>(t1 - t0).count();
+    int avg_spp = int(double(spp_accum) / double(width*height) + 0.5);
+    write_manifest(o.out, o, avg_spp, secs);
+    std::cout << "Done. avg_spp=" << avg_spp << ", time=" << secs << "s\n";
     return 0;
 }
