@@ -29,9 +29,10 @@
 #include "visionforge/bvh.hpp"
 #include "visionforge/perlin.hpp"
 #include "visionforge/aabb.hpp"
+#include "visionforge/sky.hpp"   
+#include "visionforge/bbox.hpp"   
 
-#include "visionforge/sky.hpp"    // your sky model
-#include "visionforge/bbox.hpp"   // cube_bbox_screen_rot, draw_rect, Box2D, CubePose, CameraBasis
+
 
 // ---------- tiny CLI ----------
 struct Opts {
@@ -42,32 +43,56 @@ struct Opts {
     int max_depth = 16;
     unsigned seed = 1337;
     bool preview = false;
-    double exposure_comp = 6.5;   // NEW (back to bright default)
-    double sky_gain      = 45.0;  // NEW (blue sky shows clearly)
+    double exposure_comp = 6.5;
+    double sky_gain      = 45.0;
+
+    // NEW: camera flags
+    Vec3 lookfrom = Vec3(18.0, 8.0, 24.0);
+    Vec3 lookat   = Vec3( 0.0, 1.2,  0.0);
+    double fov_deg = 35.0;
 };
+
 
 
 static void print_usage() {
     std::cout <<
-R"(VisionForge — procedural desert demo
+    R"(VisionForge — procedural desert demo
 
-Usage:
-  visionforge [--out DIR] [--width W] [--height H] [--spp N]
-              [--max-depth N] [--seed S] [--preview] [--help]
+    Usage:
+    visionforge [--out DIR] [--width W] [--height H] [--spp N]
+                [--max-depth N] [--seed S] [--preview] [--help]
+                [--exposure X] [--sky-gain X]
+                [--lookfrom "x,y,z"] [--lookat "x,y,z"] [--fov DEG]
 
-Flags:
-  --out DIR         Output directory (default: out)
-  --width W         Image width (default: 1280)
-  --height H        Image height (default: 720)
-  --spp N           Target samples per pixel (default: 96)
-  --max-depth N     Path depth (default: 16)
-  --seed S          RNG seed for scene & sampling (default: 1337)
-  --preview         Use preview balances (lighter sampling)
-  --help            Show this help
-  --exposure X      Exposure compensation multiplier (default: 6.5)
-  --sky-gain X      Sky brightness multiplier (default: 45)
-)";
+    Flags:
+    --out DIR         Output directory (default: out)
+    --width W         Image width (default: 1280)
+    --height H        Image height (default: 720)
+    --spp N           Target samples per pixel (default: 96)
+    --max-depth N     Path depth (default: 16)
+    --seed S          RNG seed (default: 1337)
+    --preview         Use preview balances (lighter sampling)
+    --help            Show this help
+    --exposure X      Exposure compensation multiplier (default: 6.5)
+    --sky-gain X      Sky brightness multiplier (default: 45)
+    --lookfrom "x,y,z" Camera position (default: 18,8,24)
+    --lookat   "x,y,z" Camera target   (default: 0,1.2,0)
+    --fov DEG         Vertical field of view in degrees (default: 35)
+    )";
 }
+
+
+static bool parse_vec3_csv(const std::string& s, Vec3& out) {
+    double x=0,y=0,z=0;
+    char c1=0,c2=0;
+    std::stringstream ss(s);
+    if ((ss >> x >> c1 >> y >> c2 >> z) && c1==',' && c2==',') {
+        out = Vec3(x,y,z);
+        return true;
+    }
+    return false;
+}
+
 
 static Opts parse(int argc, char** argv) {
     Opts o;
@@ -81,14 +106,18 @@ static Opts parse(int argc, char** argv) {
         else if (a=="--max-depth")  o.max_depth = std::stoi(argv[need(i)]);
         else if (a=="--seed")       o.seed = static_cast<unsigned>(std::stoul(argv[need(i)]));
         else if (a=="--preview")    o.preview = true;
-        else if (a=="--exposure")  o.exposure_comp = std::stod(argv[need(i)]);
-        else if (a=="--sky-gain")  o.sky_gain      = std::stod(argv[need(i)]);
+        else if (a=="--exposure")   o.exposure_comp = std::stod(argv[need(i)]);
+        else if (a=="--sky-gain")   o.sky_gain      = std::stod(argv[need(i)]);
+        else if (a=="--lookfrom")  { Vec3 v; if(!parse_vec3_csv(argv[need(i)], v)) { std::cerr<<"Bad --lookfrom\n"; std::exit(2);} o.lookfrom=v; }
+        else if (a=="--lookat")    { Vec3 v; if(!parse_vec3_csv(argv[need(i)], v)) { std::cerr<<"Bad --lookat\n";   std::exit(2);} o.lookat=v; }
+        else if (a=="--fov")        o.fov_deg = std::stod(argv[need(i)]);
         else if (a=="--help" || a=="-h") { print_usage(); std::exit(0); }
         else { std::cerr << "Unknown flag: " << a << "\n"; print_usage(); std::exit(2); }
     }
     std::filesystem::create_directories(o.out);
     return o;
 }
+
 
 static inline double clamp01(double x){ return x<0 ? 0 : (x>1 ? 1 : x); }
 static inline Vec3 clamp01(const Vec3& c){ return Vec3(clamp01(c.x),clamp01(c.y),clamp01(c.z)); }
@@ -523,12 +552,14 @@ int main(int argc, char** argv) {
     const double aspect  = double(width)/double(height);
 
     // camera
-    Vec3 lookfrom(18.0, 8.0, 24.0);
-    Vec3 lookat  ( 0.0, 1.2,  0.0);
-    double vfov_deg = 35.0;
+    // camera (from CLI)
+    Vec3 lookfrom = o.lookfrom;
+    Vec3 lookat   = o.lookat;
+    double vfov_deg = o.fov_deg;
     double focus_dist = (lookfrom - lookat).length();
     Camera cam(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect, 0.0, focus_dist, 0.0, 1.0);
     CameraBasis camBasis = make_camera_basis(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect);
+
 
     // materials
     sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
@@ -547,21 +578,20 @@ int main(int argc, char** argv) {
 
     HittableList objects;
 
-    // big side "sun" rectangle for soft shadows
-    auto rect_light = std::make_shared<YZRect>( 2.0, 14.0, -25.0, 25.0, -30.0, sun_em);
+    // --- Side "sun" rectangle: same placement as before (soft light from the left)
+    auto rect_light = std::make_shared<YZRect>(
+        /*y0=*/2.0,   /*y1=*/14.0,
+        /*z0=*/-25.0, /*z1=*/25.0,
+        /*x =*/ -30.0,   // light at x = -30; its normal points +X toward the scene
+        sun_em
+    );
     objects.add(rect_light);
 
-    // Put the visible sun in the camera's sky (20° to the right, 8° up)
-    Vec3 view_dir = normalize(lookat - lookfrom);   // camera forward
-    double deg = PI / 180.0;
-    Vec3 sun_dir = normalize( std::cos(20*deg) * view_dir
-                            + std::sin(20*deg) * camBasis.u     // right
-                            + std::sin(8*deg)  * camBasis.v );  // up
-    g_sky.set_sun_from_dir(sun_dir);
+    // Align the visible sky sun to the area light’s emission direction
+    g_sky.set_sun_from_dir(rect_light->light_normal());
 
-    // Optional: nudge how bright the background looks
-    g_sky.set_gain(1.2);        // try 1.0–2.0
-    // And keep SKY_VIEW_GAIN in the integrator modest (you set ~2.0 already)
+
+
 
 
     // RGBW cubes (your exact layout)

@@ -1,158 +1,194 @@
 # VisionForge
 
-**VisionForge** is a physically-based CPU ray tracer written in modern C++. It is built for physically accurate light transport simulation using path tracing, supporting a variety of materials, scene primitives, and render passes. The project is designed for both learning and practical experimentation in physically-based rendering.
+**VisionForge** is a physically‑based CPU path tracer written in modern C++. It’s built for learning and experimentation—fast previewing while you iterate, with knobs for quality when you’re ready to output. The demo scene features a procedural sand dune, color‑coded cubes, a soft rectangular sun light, and a visible sky with a sun disc that aligns to the key light.
 
 ---
 
-## Features
+## Highlights
 
-* **Physically-Based Rendering (PBR)** with unbiased path tracing.
-* **Material Support**:
+* **Unbiased path tracing** (Monte Carlo) with Russian roulette.
+* **Materials**: Lambertian (diffuse), emission lights.
+* **Geometry**: axis‑aligned rectangles, cubes (via rects), triangles, procedural heightfield terrain.
+* **Acceleration**: BVH for fast ray–scene intersections.
+* **Sky**: analytic daytime sky with visible sun disc + glow.
+* **Area lights**: rectangular emitter for soft shadows.
+* **Adaptive sampling** per pixel for efficient noise reduction.
+* **Output**: RGB (PPM), 2D bounding boxes (CSV/JSON), manifest (JSON). EXR writer scaffold included (static lib), ready to hook up.
 
-  * Lambertian (diffuse)
-  * Metal (reflective)
-  * Dielectric (transparent/refractive)
-  * Emissive (light sources)
-* **Acceleration Structure**:
-
-  * Bounding Volume Hierarchy (BVH) for efficient ray-scene intersections.
-* **Scene Elements**:
-
-  * Procedural terrain generation with variable roughness.
-  * Geometric primitives such as spheres, rectangles, and cubes.
-  * HDR and sky backgrounds.
-* **Multiple Render Passes**:
-
-  * `rgb` – Final rendered image.
-  * `albedo` – Base surface colors without lighting.
-  * `normal` – Surface normal visualization.
-  * `depth` – Encoded depth values.
-* **High Dynamic Range (HDR)** output via OpenEXR.
-* **Configurable Command-Line Interface** for full control over rendering parameters.
+> **Note**: The demo intentionally keeps the light transport simple so it’s easy to read/modify. Add metals, dielectrics, MIS, textures, etc., as you grow the project.
 
 ---
 
-## Project Structure
+## Project Layout
 
 ```
 VisionForge/
-├── apps/
-│   └── visionforge/        # Application entry point
-├── include/visionforge/    # Public header files
-├── src/                    # Core source code
-│   └── io/                 # Output writers (EXR, PPM)
-├── third_party/            # External libraries (CLI11, tinyexr, etc.)
-├── out/                    # Output images (generated after rendering)
-├── CMakeLists.txt          # Build configuration
-├── README.md               # This file
-└── .gitignore              # Git ignore rules
+├─ apps/visionforge/           # CLI app (main.cpp)
+├─ include/visionforge/        # Public headers (math, geometry, sky, etc.)
+├─ src/io/                     # Output helpers (EXR writer scaffold)
+├─ third_party/                # External libs (e.g., tinyexr)
+├─ build/                      # CMake build tree (generated)
+├─ out/                        # Render outputs (generated)
+├─ CMakeLists.txt
+└─ README.md
 ```
 
 ---
 
-## Installation
+## Prerequisites
 
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/BSC-137/VisionForge.git
-cd VisionForge
-```
-
-### 2. Install dependencies (Ubuntu/Debian)
+**Ubuntu / Debian**
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake zlib1g-dev libpng-dev
+sudo apt install -y build-essential cmake zlib1g-dev libpng-dev
 ```
 
-> For EXR output, ensure `tinyexr` is included in `third_party`.
+Optional but recommended: a compiler with **OpenMP** support for multi‑threaded sampling (GCC/Clang).
 
 ---
 
-## Build Instructions
+## Build
 
 ```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-cmake --build . -j$(nproc)
+# From the repo root
+rm -rf build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
-The compiled binary will be located at:
+The executable is produced at:
 
 ```
-VisionForge/build/apps/visionforge/visionforge
+./build/visionforge
 ```
+
+> If your generator nests targets (e.g., `apps/visionforge/visionforge`), CMake prints the final path at link time.
 
 ---
 
-## Usage
+## Quick Start (Mini Manual)
 
-Run the renderer with custom parameters:
+### Minimal render
 
 ```bash
-./visionforge --out ../out --width 800 --height 600 --spp 256 --max-depth 8 --seed 42
+./build/visionforge --out out --width 1280 --height 720 --spp 24 --max-depth 10 --seed 42
 ```
 
-**Available Options**:
+Outputs inside `out/`:
 
-| Option        | Description                     | Default |
-| ------------- | ------------------------------- | ------- |
-| `--out`       | Output folder                   | `./out` |
-| `--width`     | Image width in pixels           | `800`   |
-| `--height`    | Image height in pixels          | `600`   |
-| `--spp`       | Samples per pixel               | `256`   |
-| `--max-depth` | Max path tracing depth          | `8`     |
-| `--seed`      | Random seed for reproducibility | `0`     |
+* `image.ppm` – tonemapped RGB image (ACES + sqrt)
+* `bboxes.csv` – 2D boxes for the cubes (label,xmin,ymin,xmax,ymax,width,height)
+* `bboxes.json` – same, JSON
+* `manifest.json` – render metadata (resolution, spp, time, etc.)
+
+Convert PPM to PNG (ImageMagick):
+
+```bash
+convert out/image.ppm out/image.png
+```
+
+### CLI options
+
+| Flag          | Type   | What it does                                                             | Default |
+| ------------- | ------ | ------------------------------------------------------------------------ | ------- |
+| `--out`       | string | Output directory (created if missing).                                   | `out`   |
+| `--width`     | int    | Image width in pixels.                                                   | `1280`  |
+| `--height`    | int    | Image height in pixels.                                                  | `720`   |
+| `--spp`       | int    | Target samples per pixel (adaptive early‑out per pixel may stop sooner). | `96`    |
+| `--max-depth` | int    | Maximum path length (bounces).                                           | `16`    |
+| `--seed`      | int    | RNG seed (affects scene jitter, footprints, sampling).                   | `1337`  |
+| `--preview`   | flag   | Use lighter sampling/depth for fast iteration.                           | off     |
+| `--exposure`  | float  | Exposure compensation multiplier applied before tonemapping.             | `6.5`   |
+| `--sky-gain`  | float  | Extra multiplier for *visible* sky brightness (background only).         | `45`    |
+
+> **Camera**: The demo scene uses a fixed camera in code. CLI camera controls (`--lookfrom`, `--lookat`, `--vfov`) are planned; see the *Roadmap* below.
+
+### Example: brighter sky, faster preview
+
+```bash
+./build/visionforge \
+  --out out/preview --width 960 --height 540 --spp 12 --max-depth 8 --preview \
+  --exposure 6.5 --sky-gain 45
+```
+
+### Example: higher quality
+
+```bash
+./build/visionforge \
+  --out out/hq --width 1920 --height 1080 --spp 256 --max-depth 16 \
+  --exposure 6.5 --sky-gain 40
+```
 
 ---
 
-## Current Output Examples
+## About the Lighting & Sky
 
-Recent builds have produced:
+* A **rectangular area light** to camera‑left stands in for the sun. It produces **soft, directional** illumination and shadows.
+* The **visible sky** (background) is analytic with a **sun disc** and warm halo. Its sun direction is **aligned to the area light’s normal**, so the disc appears where the lighting says it should.
+* The sky background **does not** light the scene (by design for the demo), so you can tweak `--sky-gain` without affecting shading—useful for composition.
 
-* **Procedural terrain** with adjustable roughness and fine-tuned detail levels.
-* **Cubes** positioned on the terrain with distinct materials (e.g., red diffuse, green reflective/diffuse hybrid).
-* **Lighting and shading** consistent with physically-based principles, producing realistic shadows and soft global illumination.
-* **Intermediate quality** between fast previews and full production renders, balancing noise reduction with render time.
+**Tuning knobs** (edit in `apps/visionforge/main.cpp`):
 
-The renderer can output both **quick preview renders** (low SPP, low max-depth) for iteration, and **high-quality outputs** (high SPP, BVH acceleration) for final scenes.
+* Area light size/position → softer or sharper shadows.
+* Sky turbidity/strength → richer or flatter sky.
+* Exposure → overall scene brightness before tonemapping.
+
+---
+
+## Adaptive Sampling
+
+Each pixel accumulates samples until either it reaches `--spp`, or the **95% confidence interval** for luminance falls below a relative threshold. This helps keep total render time down while focusing effort on noisy regions.
 
 ---
 
 ## Performance Tips
 
-* Use **low SPP (16–64)** for previews, then increase for final renders.
-* Keep `--max-depth` reasonable (8–16) to balance quality and performance.
-* BVH acceleration significantly reduces render time for large scenes.
-* Reduce terrain complexity if quick iterations are needed.
+* Use `--preview` and smaller resolution while iterating on code/parameters.
+* Keep `--max-depth` between 8–16 for typical outdoor scenes.
+* Increase SPP in steps; double SPP ≈ √2 noise reduction (rough rule).
+* Build with `Release` and a recent compiler. Enable OpenMP if available.
 
 ---
 
-## Viewing Output
+## Output Files
 
-* **PPM** files can be opened in GIMP, Photoshop, or converted with ImageMagick:
-
-```bash
-convert rgb.ppm rgb.png
+```
+out/
+├─ image.ppm          # Final tonemapped frame
+├─ bboxes.csv         # 2D boxes (for ML/data tasks)
+├─ bboxes.json        # Same in JSON
+└─ manifest.json      # Render metadata
 ```
 
-* **EXR** files can be viewed with:
+**EXR**: An EXR writer is present under `src/io/` (static library built as `vf_io`). Hook it into the app as needed to write HDR in addition to PPM.
 
-  * GIMP
-  * Krita
-  * Blender
-  * `exrdisplay` from OpenEXR tools
+---
+
+## Roadmap (Short‑Term)
+
+* **CLI Camera controls**: `--lookfrom ax,ay,az`, `--lookat bx,by,bz`, `--vfov deg`.
+* **Output formats**: optional `--exr out/image.exr` (HDR) alongside PPM.
+* **More materials**: metal, dielectric, textured albedo; MIS for light sampling.
+* **Denoising**: optional Intel OIDN pass for faster clean previews.
 
 ---
 
 ## Troubleshooting
 
-* **Image is noisy** → Increase SPP or apply a denoiser like Intel OpenImageDenoise.
-* **Build errors** → Verify all dependencies are installed and your compiler supports C++17 or newer.
+* **Image looks dark** → raise `--exposure` (e.g., 8–10).
+* **Sky too dim/bright** → adjust `--sky-gain` (background only).
+* **Noisy** → increase `--spp` and/or `--max-depth`. Make sure you’re building in `Release`.
+* **Build errors** → verify CMake ≥ 3.16 and a C++17 compiler; ensure third‑party headers are present.
+
+---
+
+## Contributing
+
+PRs welcome! Please keep changes readable and isolated (materials, integrator, geometry). Add a short note to the README for new flags or outputs.
 
 ---
 
 ## License
 
-This project is licensed under the BSD-3-Clause License.
+BSD‑3‑Clause. See `LICENSE`.
