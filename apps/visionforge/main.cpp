@@ -42,7 +42,10 @@ struct Opts {
     int max_depth = 16;
     unsigned seed = 1337;
     bool preview = false;
+    double exposure_comp = 6.5;   // NEW (back to bright default)
+    double sky_gain      = 45.0;  // NEW (blue sky shows clearly)
 };
+
 
 static void print_usage() {
     std::cout <<
@@ -61,6 +64,8 @@ Flags:
   --seed S          RNG seed for scene & sampling (default: 1337)
   --preview         Use preview balances (lighter sampling)
   --help            Show this help
+  --exposure X      Exposure compensation multiplier (default: 6.5)
+  --sky-gain X      Sky brightness multiplier (default: 45)
 )";
 }
 
@@ -76,6 +81,8 @@ static Opts parse(int argc, char** argv) {
         else if (a=="--max-depth")  o.max_depth = std::stoi(argv[need(i)]);
         else if (a=="--seed")       o.seed = static_cast<unsigned>(std::stoul(argv[need(i)]));
         else if (a=="--preview")    o.preview = true;
+        else if (a=="--exposure")  o.exposure_comp = std::stod(argv[need(i)]);
+        else if (a=="--sky-gain")  o.sky_gain      = std::stod(argv[need(i)]);
         else if (a=="--help" || a=="-h") { print_usage(); std::exit(0); }
         else { std::cerr << "Unknown flag: " << a << "\n"; print_usage(); std::exit(2); }
     }
@@ -503,8 +510,10 @@ int main(int argc, char** argv) {
     double F_NUMBER = 2.0;
     double SHUTTER  = 1.0/30.0;
     int    ISO      = 400;
-    double EXPOSURE_COMP = 6.5;
-    double SKY_VIEW_GAIN = 68.0;
+    double EXPOSURE_COMP = o.exposure_comp;
+    double SKY_VIEW_GAIN = o.sky_gain;
+
+
 
     // image dims
     const int width  = WIDTH;
@@ -542,8 +551,18 @@ int main(int argc, char** argv) {
     auto rect_light = std::make_shared<YZRect>( 2.0, 14.0, -25.0, 25.0, -30.0, sun_em);
     objects.add(rect_light);
 
-    // align visible sky sun to rect normal
-    g_sky.set_sun_from_dir(rect_light->light_normal());
+    // Put the visible sun in the camera's sky (20° to the right, 8° up)
+    Vec3 view_dir = normalize(lookat - lookfrom);   // camera forward
+    double deg = PI / 180.0;
+    Vec3 sun_dir = normalize( std::cos(20*deg) * view_dir
+                            + std::sin(20*deg) * camBasis.u     // right
+                            + std::sin(8*deg)  * camBasis.v );  // up
+    g_sky.set_sun_from_dir(sun_dir);
+
+    // Optional: nudge how bright the background looks
+    g_sky.set_gain(1.2);        // try 1.0–2.0
+    // And keep SKY_VIEW_GAIN in the integrator modest (you set ~2.0 already)
+
 
     // RGBW cubes (your exact layout)
     struct CubeSpec { Vec3 center; double edge; const char* label; };
