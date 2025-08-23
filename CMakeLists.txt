@@ -11,6 +11,10 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# ---- Options ----
+option(VISIONFORGE_OMP "Enable OpenMP parallel rendering if available" ON)
+option(VISIONFORGE_LTO "Enable interprocedural optimization (LTO) if supported" ON)
+
 # ---- Warnings ----
 if (MSVC)
   add_compile_options(/W4)
@@ -41,24 +45,39 @@ add_executable(visionforge_app apps/visionforge/main.cpp)
 target_link_libraries(visionforge_app PRIVATE visionforge vf_io)
 
 # ---- OpenMP (parallel render) ----
-find_package(OpenMP)
-if (OpenMP_CXX_FOUND)
-  target_link_libraries(visionforge_app PUBLIC OpenMP::OpenMP_CXX)
-  target_compile_definitions(visionforge_app PUBLIC VF_USE_OMP=1)
+if (VISIONFORGE_OMP)
+  find_package(OpenMP)
+  if (OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP found: enabling multithreaded sampler")
+    target_link_libraries(visionforge_app PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(visionforge_app PUBLIC VF_USE_OMP=1)
+  else()
+    message(STATUS "OpenMP NOT found: building single-threaded")
+  endif()
 endif()
 
-# ---- Optimizations (non‑MSVC) ----
-if (NOT MSVC)
-  target_compile_options(vf_io           PRIVATE -O3 -march=native -DNDEBUG)
-  target_compile_options(visionforge_app PRIVATE -O3 -march=native -DNDEBUG)
+# ---- Optimizations ----
+if (MSVC)
+  target_compile_options(vf_io           PRIVATE /O2 /DNDEBUG)
+  target_compile_options(visionforge_app PRIVATE /O2 /DNDEBUG)
+  # Optional: enable AVX2 if your CPUs support it
+  # target_compile_options(vf_io           PRIVATE /arch:AVX2)
+  # target_compile_options(visionforge_app PRIVATE /arch:AVX2)
+else()
+  target_compile_options(vf_io           PRIVATE -O3 -march=native -DNDEBUG -ffast-math)
+  target_compile_options(visionforge_app PRIVATE -O3 -march=native -DNDEBUG -ffast-math)
 endif()
 
 # ---- (Optional) IPO/LTO ----
-include(CheckIPOSupported)
-check_ipo_supported(RESULT ipo_ok OUTPUT ipo_msg)
-if (ipo_ok)
-  set_property(TARGET visionforge_app PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-  set_property(TARGET vf_io            PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+if (VISIONFORGE_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT ipo_ok OUTPUT ipo_msg)
+  if (ipo_ok)
+    set_property(TARGET visionforge_app PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET vf_io            PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+  else()
+    message(STATUS "IPO/LTO not supported: ${ipo_msg}")
+  endif()
 endif()
 
 # ---- Output name ----

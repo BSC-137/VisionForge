@@ -1,6 +1,8 @@
 # VisionForge
 
-**VisionForge** is a physically‑based CPU path tracer written in modern C++. It’s built for learning and experimentation—fast previewing while you iterate, with knobs for quality when you’re ready to output. The demo scene features a procedural sand dune, color‑coded cubes, a soft rectangular sun light, and a visible sky with a sun disc that aligns to the key light.
+**VisionForge** is a physically‑based CPU path tracer written in modern C++. It’s built for both **learning** and **synthetic dataset generation**. You can preview quickly with lightweight settings, or render high‑quality outputs with YOLO/COCO labels and per‑pixel masks.
+
+The demo scene features a procedural sand dune, color‑coded cubes, a soft rectangular sun light, and a visible sky with a sun disc aligned to the key light.
 
 ---
 
@@ -13,9 +15,15 @@
 * **Sky**: analytic daytime sky with visible sun disc + glow.
 * **Area lights**: rectangular emitter for soft shadows.
 * **Adaptive sampling** per pixel for efficient noise reduction.
-* **Output**: RGB (PPM), 2D bounding boxes (CSV/JSON), manifest (JSON). EXR writer scaffold included (static lib), ready to hook up.
+* **Outputs**:
 
-> **Note**: The demo intentionally keeps the light transport simple so it’s easy to read/modify. Add metals, dielectrics, MIS, textures, etc., as you grow the project.
+  * RGB (PPM)
+  * Per‑pixel **instance mask** (`inst.pgm`)
+  * 2D bounding boxes from mask (`labels_from_mask.csv/json`)
+  * YOLO labels (`labels_yolo.txt`)
+  * COCO annotations (`labels_coco.json`)
+  * Projected boxes (`bboxes.csv/json`) for comparison
+  * Render metadata (`manifest.json`)
 
 ---
 
@@ -25,7 +33,7 @@
 VisionForge/
 ├─ apps/visionforge/           # CLI app (main.cpp)
 ├─ include/visionforge/        # Public headers (math, geometry, sky, etc.)
-├─ src/io/                     # Output helpers (EXR writer scaffold)
+├─ src/io/                     # Output helpers (EXR scaffold)
 ├─ third_party/                # External libs (e.g., tinyexr)
 ├─ build/                      # CMake build tree (generated)
 ├─ out/                        # Render outputs (generated)
@@ -44,7 +52,7 @@ sudo apt update
 sudo apt install -y build-essential cmake zlib1g-dev libpng-dev
 ```
 
-Optional but recommended: a compiler with **OpenMP** support for multi‑threaded sampling (GCC/Clang).
+Optional: a compiler with **OpenMP** support (GCC/Clang) for multithreaded sampling.
 
 ---
 
@@ -57,135 +65,93 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-The executable is produced at:
-
-```
-./build/visionforge
-```
-
-> If your generator nests targets (e.g., `apps/visionforge/visionforge`), CMake prints the final path at link time.
+Executable: `./build/visionforge`
 
 ---
 
-## Quick Start (Mini Manual)
+## Quick Start
 
-### Minimal render
+Minimal render:
 
 ```bash
 ./build/visionforge --out out --width 1280 --height 720 --spp 24 --max-depth 10 --seed 42
 ```
 
-Outputs inside `out/`:
+Outputs in `out/`:
 
-* `image.ppm` – tonemapped RGB image (ACES + sqrt)
-* `bboxes.csv` – 2D boxes for the cubes (label,xmin,ymin,xmax,ymax,width,height)
-* `bboxes.json` – same, JSON
-* `manifest.json` – render metadata (resolution, spp, time, etc.)
+* `image.ppm` – tonemapped RGB image (ACES + sqrt gamma)
+* `inst.pgm` – per‑pixel instance mask (IDs)
+* `labels_from_mask.csv/json` – tight bounding boxes per object
+* `labels_yolo.txt` – YOLO labels
+* `labels_coco.json` – COCO annotations
+* `bboxes.csv/json` – projected cube boxes (legacy)
+* `manifest.json` – render metadata
 
-Convert PPM to PNG (ImageMagick):
+Convert PPM → PNG:
 
 ```bash
 convert out/image.ppm out/image.png
 ```
 
-### CLI options
+---
 
-| Flag          | Type   | What it does                                                             | Default |
-| ------------- | ------ | ------------------------------------------------------------------------ | ------- |
-| `--out`       | string | Output directory (created if missing).                                   | `out`   |
-| `--width`     | int    | Image width in pixels.                                                   | `1280`  |
-| `--height`    | int    | Image height in pixels.                                                  | `720`   |
-| `--spp`       | int    | Target samples per pixel (adaptive early‑out per pixel may stop sooner). | `96`    |
-| `--max-depth` | int    | Maximum path length (bounces).                                           | `16`    |
-| `--seed`      | int    | RNG seed (affects scene jitter, footprints, sampling).                   | `1337`  |
-| `--preview`   | flag   | Use lighter sampling/depth for fast iteration.                           | off     |
-| `--exposure`  | float  | Exposure compensation multiplier applied before tonemapping.             | `6.5`   |
-| `--sky-gain`  | float  | Extra multiplier for *visible* sky brightness (background only).         | `45`    |
+## CLI Options
 
-> **Camera**: The demo scene uses a fixed camera in code. CLI camera controls (`--lookfrom`, `--lookat`, `--vfov`) are planned; see the *Roadmap* below.
+| Flag          | Type   | What it does                                             | Default   |
+| ------------- | ------ | -------------------------------------------------------- | --------- |
+| `--out`       | string | Output directory.                                        | `out`     |
+| `--width`     | int    | Image width in pixels.                                   | `1280`    |
+| `--height`    | int    | Image height in pixels.                                  | `720`     |
+| `--spp`       | int    | Target samples per pixel.                                | `96`      |
+| `--max-depth` | int    | Maximum path depth.                                      | `16`      |
+| `--seed`      | int    | RNG seed.                                                | `1337`    |
+| `--preview`   | flag   | Fast preview mode (lower spp/depth/light samples).       | off       |
+| `--exposure`  | float  | Exposure multiplier before tonemapping.                  | `6.5`     |
+| `--sky-gain`  | float  | Multiplier for visible sky brightness (background only). | `45`      |
+| `--lookfrom`  | csv    | Camera position (x,y,z).                                 | `18,8,24` |
+| `--lookat`    | csv    | Camera target (x,y,z).                                   | `0,1.2,0` |
+| `--fov`       | deg    | Vertical field of view.                                  | `35`      |
 
-### Example: brighter sky, faster preview
+**Presets:**
 
-```bash
-./build/visionforge \
-  --out out/preview --width 960 --height 540 --spp 12 --max-depth 8 --preview \
-  --exposure 6.5 --sky-gain 45
-```
-
-### Example: higher quality
-
-```bash
-./build/visionforge \
-  --out out/hq --width 1920 --height 1080 --spp 256 --max-depth 16 \
-  --exposure 6.5 --sky-gain 40
-```
+* **Preview** (`--preview`): spp=12, max‑depth=6, light samples=2.
+* **Final**: user‑set spp/depth, light samples=6.
 
 ---
 
-## About the Lighting & Sky
+## Lighting & Sky
 
-* A **rectangular area light** to camera‑left stands in for the sun. It produces **soft, directional** illumination and shadows.
-* The **visible sky** (background) is analytic with a **sun disc** and warm halo. Its sun direction is **aligned to the area light’s normal**, so the disc appears where the lighting says it should.
-* The sky background **does not** light the scene (by design for the demo), so you can tweak `--sky-gain` without affecting shading—useful for composition.
-
-**Tuning knobs** (edit in `apps/visionforge/main.cpp`):
-
-* Area light size/position → softer or sharper shadows.
-* Sky turbidity/strength → richer or flatter sky.
-* Exposure → overall scene brightness before tonemapping.
-
----
-
-## Adaptive Sampling
-
-Each pixel accumulates samples until either it reaches `--spp`, or the **95% confidence interval** for luminance falls below a relative threshold. This helps keep total render time down while focusing effort on noisy regions.
+* Large **rectangular area light** (key sun) for soft shadows.
+* **Analytic sky** with sun disc + halo, aligned to area light direction.
+* Sky background intensity (`--sky-gain`) is independent of shading.
 
 ---
 
 ## Performance Tips
 
-* Use `--preview` and smaller resolution while iterating on code/parameters.
-* Keep `--max-depth` between 8–16 for typical outdoor scenes.
-* Increase SPP in steps; double SPP ≈ √2 noise reduction (rough rule).
-* Build with `Release` and a recent compiler. Enable OpenMP if available.
+* Build in **Release**.
+* Use `--preview` and small resolutions while iterating.
+* Increase `--spp` gradually (noise decreases \~ √SPP).
+* Keep `--max-depth` around 8–16 for typical outdoor scenes.
 
 ---
 
-## Output Files
+## Roadmap
 
-```
-out/
-├─ image.ppm          # Final tonemapped frame
-├─ bboxes.csv         # 2D boxes (for ML/data tasks)
-├─ bboxes.json        # Same in JSON
-└─ manifest.json      # Render metadata
-```
-
-**EXR**: An EXR writer is present under `src/io/` (static library built as `vf_io`). Hook it into the app as needed to write HDR in addition to PPM.
-
----
-
-## Roadmap (Short‑Term)
-
-* **CLI Camera controls**: `--lookfrom ax,ay,az`, `--lookat bx,by,bz`, `--vfov deg`.
-* **Output formats**: optional `--exr out/image.exr` (HDR) alongside PPM.
-* **More materials**: metal, dielectric, textured albedo; MIS for light sampling.
-* **Denoising**: optional Intel OIDN pass for faster clean previews.
+* **Dataset mode** (`--dataset N --name <run>`): render N randomized frames into `datasets/<name>/...`.
+* **EXR output** toggle for HDR.
+* More materials (metal, dielectric, textured).
+* MIS direct lighting for better convergence.
+* Optional Intel OIDN denoiser for previews.
 
 ---
 
 ## Troubleshooting
 
-* **Image looks dark** → raise `--exposure` (e.g., 8–10).
-* **Sky too dim/bright** → adjust `--sky-gain` (background only).
-* **Noisy** → increase `--spp` and/or `--max-depth`. Make sure you’re building in `Release`.
-* **Build errors** → verify CMake ≥ 3.16 and a C++17 compiler; ensure third‑party headers are present.
-
----
-
-## Contributing
-
-PRs welcome! Please keep changes readable and isolated (materials, integrator, geometry). Add a short note to the README for new flags or outputs.
+* **Dark image** → increase `--exposure`.
+* **Sky too bright/dim** → adjust `--sky-gain`.
+* **Noisy output** → raise `--spp`, `--max-depth`.
+* **Build errors** → ensure CMake ≥ 3.16, C++17 compiler, deps installed.
 
 ---
 

@@ -27,7 +27,7 @@ public:
         rec.point = r.at(t);
         rec.set_face_normal(r, Vec3(0,1,0));
         rec.mat = mat;
-        rec.object_id = this->id;          // NEW
+        rec.hit_object = this;
         return true;
     }
 

@@ -1,7 +1,5 @@
 // VisionForge — CLI wrapper around your procedural desert demo
-// Flags: --out, --width, --height, --spp, --max-depth, --seed, --preview
-// Writes: <out>/image.ppm, bboxes.{csv,json}, manifest.json
-
+// Writes: <out>/image.ppm, inst.pgm, labels_from_mask.{csv,json}, bboxes.{csv,json}, manifest.json
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -14,6 +12,7 @@
 #include <random>
 #include <cmath>
 #include <algorithm>
+#include <limits>  // for std::numeric_limits
 
 #include "visionforge/vec3.hpp"
 #include "visionforge/ray.hpp"
@@ -29,30 +28,43 @@
 #include "visionforge/bvh.hpp"
 #include "visionforge/perlin.hpp"
 #include "visionforge/aabb.hpp"
-#include "visionforge/sky.hpp"   
-#include "visionforge/bbox.hpp"   
+#include "visionforge/sky.hpp"
+#include "visionforge/bbox.hpp"
 
-
+// NEW: dataset/annotation plumbing
+#include "visionforge/tag.hpp"
+#include "visionforge/passes.hpp"
+#include "visionforge/mask_writer.hpp"
+#include "visionforge/bbox_from_mask.hpp"
+#include "visionforge/coco.hpp"
+#include "visionforge/yolo.hpp"
 
 // ---------- tiny CLI ----------
 struct Opts {
     std::string out = "out";
-    int width = 1280;
-    int height = 720;
-    int spp = 96;
-    int max_depth = 16;
+    int width = 1280, height = 720;
+    int spp = 96, max_depth = 16;
     unsigned seed = 1337;
     bool preview = false;
     double exposure_comp = 6.5;
-    double sky_gain      = 45.0;
+    double sky_gain = 45.0;
 
-    // NEW: camera flags
-    Vec3 lookfrom = Vec3(18.0, 8.0, 24.0);
-    Vec3 lookat   = Vec3( 0.0, 1.2,  0.0);
+    // camera
+    Vec3 lookfrom = Vec3(18.0,8.0,24.0);
+    Vec3 lookat   = Vec3(0.0,1.2,0.0);
     double fov_deg = 35.0;
+
+    // dataset/param growth (not fully used yet; kept for future CLI)
+    int dataset = 0;
+    std::string name = "run1";
+    double terrain_amp = 1.8;
+    double terrain_scale = 0.14;
+    int terrain_nx = 96, terrain_nz = 96;
+    int cubes = 4;
+    double cube_edge_min = 1.4, cube_edge_max = 1.9;
+    double cube_tilt_abs = 12.0;
+    std::vector<Vec3> cube_colors;
 };
-
-
 
 static void print_usage() {
     std::cout <<
@@ -81,7 +93,6 @@ static void print_usage() {
     )";
 }
 
-
 static bool parse_vec3_csv(const std::string& s, Vec3& out) {
     double x=0,y=0,z=0;
     char c1=0,c2=0;
@@ -92,7 +103,6 @@ static bool parse_vec3_csv(const std::string& s, Vec3& out) {
     }
     return false;
 }
-
 
 static Opts parse(int argc, char** argv) {
     Opts o;
@@ -118,14 +128,13 @@ static Opts parse(int argc, char** argv) {
     return o;
 }
 
-
 static inline double clamp01(double x){ return x<0 ? 0 : (x>1 ? 1 : x); }
 static inline Vec3 clamp01(const Vec3& c){ return Vec3(clamp01(c.x),clamp01(c.y),clamp01(c.z)); }
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
 
-// ---------- Transform wrappers (from your code) ----------
+// ---------- Transform wrappers ----------
 class Translate : public Hittable {
 public:
     std::shared_ptr<Hittable> ptr;
@@ -135,6 +144,7 @@ public:
         Ray moved(r.origin - offset, r.direction, r.time);
         if (!ptr->hit(moved, t_min, t_max, rec)) return false;
         rec.point += offset;
+        // keep rec.hit_object as set by child (or Tag)
         return true;
     }
     bool bounding_box(AABB& out_box) const override {
@@ -189,9 +199,7 @@ public:
 
 class RotateZ : public Hittable {
 public:
-    std::shared_ptr<Hittable> ptr;
-    double sin_t, cos_t;
-    AABB box;
+    std::shared_ptr<Hittable> ptr; double sin_t, cos_t; AABB box;
     RotateZ(std::shared_ptr<Hittable> p, double angle_deg) : ptr(std::move(p)) {
         double rad = angle_deg * PI/180.0;
         sin_t = std::sin(rad); cos_t = std::cos(rad);
@@ -205,8 +213,7 @@ public:
                 double nx =  cos_t*x - sin_t*y;
                 double ny =  sin_t*x + cos_t*y;
                 Vec3 t(nx,ny,z);
-                minv = min_vec(minv, t);
-                maxv = max_vec(maxv, t);
+                minv = min_vec(minv, t); maxv = max_vec(maxv, t);
             }
             box = AABB(minv,maxv);
         }
@@ -230,7 +237,7 @@ public:
     bool bounding_box(AABB& out_box) const override { out_box = box; return true; }
 };
 
-// ---------- Triangle + HeightField (from your code) ----------
+// ---------- Triangle + HeightField ----------
 class Triangle : public Hittable {
 public:
     Vec3 p0, p1, p2, n0, n1, n2;
@@ -268,6 +275,7 @@ public:
         if (dot(n,r.direction)>0) n=-n;
         rec.normal=n;
         rec.mat=mat;
+        rec.hit_object = this;   // IMPORTANT: identify the triangle's object
         return true;
     }
     bool bounding_box(AABB& out_box) const override{ out_box=box; return true; }
@@ -376,30 +384,36 @@ static std::shared_ptr<Lambertian> sand_ptr; // to identify sand material
 // ---------- Sky (global) ----------
 static Sky g_sky(/*sun_az_deg=*/300.0, /*sun_elev_deg=*/12.0, /*turbidity=*/3.5);
 
-// ---------- helpers from your code ----------
+// ---------- helpers ----------
 static inline bool get_lambert_albedo(const std::shared_ptr<Material>& m, Vec3& out_albedo) {
     if (auto* lam = dynamic_cast<Lambertian*>(m.get())) { out_albedo = lam->albedo; return true; }
     return false;
 }
 
-// Note: random_double() is assumed available from your existing headers.
-
 // ---------- Integrator with area light sampling ----------
+// NEW: accept a GBuffer to write instance ids for primary rays
 template<typename RectT>
 Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int depth, int max_depth,
                bool PREVIEW, int LIGHT_SAMPLES_PREVIEW, int LIGHT_SAMPLES_FINAL,
-               int MAX_DEPTH_PREVIEW, int MAX_DEPTH_FINAL, double SKY_VIEW_GAIN)
+               int MAX_DEPTH_PREVIEW, int MAX_DEPTH_FINAL, double SKY_VIEW_GAIN,
+               GBuffer* gbuf, int pix_index)
 {
     if (depth <= 0) return Vec3(0,0,0);
     HitRecord rec;
 
-    // Miss: visible sky for primary rays
+    // Miss: visible sky for primary rays only
     if (!world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
         if (depth == max_depth) return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
         return Vec3(0,0,0);
     }
 
-    // Hide emissive rects from primary camera ray
+    // On the first (camera) hit, write instance id to the mask
+    if (depth == max_depth && gbuf) {
+        uint32_t inst = (rec.hit_object ? rec.hit_object->obj.instance_id : 0);
+        gbuf->inst_id[pix_index] = inst;
+    }
+
+    // Hide emissive rects from primary camera ray so sky shows instead
     if (depth == max_depth) {
         if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr)
             return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
@@ -429,7 +443,8 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
 
     Vec3 indirect = attenuation * ray_color(scattered, world, area_light, depth - 1, max_depth,
                                             PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
-                                            MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN);
+                                            MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
+                                            gbuf, pix_index);
 
     Vec3 direct(0,0,0);
     Vec3 albedo;
@@ -522,7 +537,7 @@ int main(int argc, char** argv) {
     Opts o = parse(argc, argv);
     std::srand(o.seed);
 
-    // render controls (replacing your old static CONFIG)
+    // render controls
     bool   PREVIEW = o.preview;
     int    WIDTH   = o.width;
     int    HEIGHT  = o.height;
@@ -535,14 +550,12 @@ int main(int argc, char** argv) {
     int    MIN_SPP = 6;
     double REL_NOISE_TARGET = 0.020;
 
-    // exposure & preview sky intensity (same as your code)
+    // exposure / sky intensity
     double F_NUMBER = 2.0;
     double SHUTTER  = 1.0/30.0;
     int    ISO      = 400;
     double EXPOSURE_COMP = o.exposure_comp;
     double SKY_VIEW_GAIN = o.sky_gain;
-
-
 
     // image dims
     const int width  = WIDTH;
@@ -552,14 +565,12 @@ int main(int argc, char** argv) {
     const double aspect  = double(width)/double(height);
 
     // camera
-    // camera (from CLI)
     Vec3 lookfrom = o.lookfrom;
     Vec3 lookat   = o.lookat;
     double vfov_deg = o.fov_deg;
     double focus_dist = (lookfrom - lookat).length();
     Camera cam(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect, 0.0, focus_dist, 0.0, 1.0);
     CameraBasis camBasis = make_camera_basis(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect);
-
 
     // materials
     sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
@@ -578,23 +589,19 @@ int main(int argc, char** argv) {
 
     HittableList objects;
 
-    // --- Side "sun" rectangle: same placement as before (soft light from the left)
+    // area light (rect to camera-left)
     auto rect_light = std::make_shared<YZRect>(
         /*y0=*/2.0,   /*y1=*/14.0,
         /*z0=*/-25.0, /*z1=*/25.0,
-        /*x =*/ -30.0,   // light at x = -30; its normal points +X toward the scene
+        /*x =*/ -30.0,
         sun_em
     );
     objects.add(rect_light);
 
-    // Align the visible sky sun to the area light’s emission direction
+    // match visible sky sun to light direction
     g_sky.set_sun_from_dir(rect_light->light_normal());
 
-
-
-
-
-    // RGBW cubes (your exact layout)
+    // cubes (tag each with unique instance id)
     struct CubeSpec { Vec3 center; double edge; const char* label; };
     const double base_edge = 1.6;
     std::vector<CubeSpec> specs = {
@@ -607,6 +614,10 @@ int main(int argc, char** argv) {
     std::mt19937 rng(o.seed ^ 0x9e3779b1);
     std::uniform_real_distribution<double> tilt_deg(-12.0, 12.0);
     std::uniform_real_distribution<double> sink_ratio_rng(0.08, 0.22);
+
+    // registry for labels/classes (used by exporters)
+    IdRegistry reg;
+    uint32_t next_instance_id = 1; // 0 = background
 
     std::vector<CubePose> cubes; cubes.reserve(specs.size());
     for (auto& s : specs) {
@@ -628,7 +639,15 @@ int main(int argc, char** argv) {
         tilted = std::make_shared<RotateX>(tilted, pitch);
         tilted = std::make_shared<Translate>(tilted, c);
 
-        objects.add(tilted);
+        // TAG the cube so all its faces share one instance/class/label
+        uint32_t id = next_instance_id++;
+        ObjectInfo info{ id, /*class_id=*/1u, s.label }; // 1=cube
+        auto tagged = std::make_shared<Tag>(tilted, info);
+        objects.add(tagged);
+
+        reg.id_to_label[id] = s.label;
+        reg.id_to_class[id] = 1u;
+
         cubes.push_back(CubePose{c, s.edge, roll, pitch, s.label});
     }
 
@@ -643,6 +662,7 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::high_resolution_clock::now();
 
     std::vector<unsigned char> fb(width * height * 3, 0);
+    GBuffer gbuf(width, height); // NEW: per-pixel instance id
     double exposure = exposure_scale(F_NUMBER, SHUTTER, ISO) * EXPOSURE_COMP;
 
     long long spp_accum = 0;
@@ -655,13 +675,15 @@ int main(int argc, char** argv) {
             Vec3 sum(0,0,0);
             double meanL = 0.0, M2 = 0.0;
             int s = 0;
+            int pix_index = ((height-1-j)*width + i); // NEW: linear index for gbuffer
             for (; s < spp_target; ++s) {
                 double u = (i + random_double()) / (width  - 1);
                 double v = (j + random_double()) / (height - 1);
                 Ray r = cam.get_ray(u, v);
                 Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
                                    PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
-                                   MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN);
+                                   MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
+                                   &gbuf, pix_index);
                 sum += c;
 
                 // adaptive stop
@@ -679,14 +701,14 @@ int main(int argc, char** argv) {
             Vec3 pixel = (sum / double(s+1)) * exposure;
             Vec3 mapped = aces_tonemap(pixel);
             mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
-            int idx = ((height-1-j)*width + i)*3;
+            int idx = pix_index*3;
             fb[idx+0] = (unsigned char)(256 * clamp01(mapped.x));
             fb[idx+1] = (unsigned char)(256 * clamp01(mapped.y));
             fb[idx+2] = (unsigned char)(256 * clamp01(mapped.z));
         }
     }
 
-    // 2D bbox overlay (from your bbox.hpp helpers)
+    // 2D bbox overlay from analytic cube OBBs (optional visualization)
     std::vector<Box2D> boxes; boxes.reserve(cubes.size());
     for (auto& pose : cubes){
         Box2D b = cube_bbox_screen_rot(camBasis, pose, width, height);
@@ -706,6 +728,7 @@ int main(int argc, char** argv) {
     file.write(reinterpret_cast<const char*>(fb.data()), fb.size());
     std::cout << "Wrote " << ppm << "\n";
 
+    // projected OBBs (as before)
     {
         std::ofstream c(csv);
         c << "label,xmin,ymin,xmax,ymax,width,height\n";
@@ -728,6 +751,36 @@ int main(int argc, char** argv) {
         }
         j << "  ]\n}\n";
         std::cout << "Wrote " << json << "\n";
+    }
+
+    // NEW: write instance mask + tight boxes from mask
+    write_inst_pgm(o.out + "/inst.pgm", gbuf);
+    std::cout << "Wrote " << (o.out + "/inst.pgm") << "\n";
+
+    auto tight = boxes_from_mask(gbuf, reg);
+    write_boxes_csv (o.out + "/labels_from_mask.csv",  tight, width, height);
+    write_boxes_json(o.out + "/labels_from_mask.json", tight, width, height);
+    std::cout << "Wrote labels_from_mask.{csv,json}\n";
+
+    // Optional: YOLO / COCO (uses your implementations)
+    {
+        std::vector<std::tuple<int,int,int,int,int>> yolo_boxes;
+        for (auto& b : tight) {
+            // class_id, xmin, ymin, xmax, ymax
+            yolo_boxes.emplace_back(int(b.class_id), b.x0, b.y0, b.x1, b.y1);
+        }
+        write_yolo_txt(o.out + "/labels_yolo.txt", width, height, yolo_boxes);
+        std::cout << "Wrote " << (o.out + "/labels_yolo.txt") << "\n";
+    }
+    {
+        CocoWriter coco;
+        coco.ensure_category(1, "cube");
+        int img_id = coco.add_image("image.ppm", width, height); // metadata only
+        for (auto& b : tight) {
+            coco.add_box(img_id, b.class_id, b.x0, b.y0, b.x1, b.y1, b.instance_id, b.label);
+        }
+        coco.write(o.out + "/labels_coco.json");
+        std::cout << "Wrote " << (o.out + "/labels_coco.json") << "\n";
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();

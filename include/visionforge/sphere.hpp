@@ -34,7 +34,8 @@ public:
         rec.mat = mat;
 
         // NEW: carry instance id into the hit record
-        rec.object_id = this->id;
+        rec.hit_object = this;
+
 
         return true;
     }
