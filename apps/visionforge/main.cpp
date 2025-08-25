@@ -31,16 +31,12 @@
 #include "visionforge/aabb.hpp"
 #include "visionforge/sky.hpp"
 #include "visionforge/bbox.hpp"
-
-// dataset/annotation plumbing you already have
 #include "visionforge/tag.hpp"
 #include "visionforge/passes.hpp"
 #include "visionforge/mask_writer.hpp"
 #include "visionforge/bbox_from_mask.hpp"
 #include "visionforge/coco.hpp"
 #include "visionforge/yolo.hpp"
-
-
 #include "visionforge/triangle.hpp"
 #include "visionforge/transform.hpp"
 
