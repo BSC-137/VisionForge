@@ -8,9 +8,8 @@
 #endif
 
 // Camera background sky with a visible sun disc + warm halo.
-// NOTE: This is *background only* (no lighting). Your rect area light
-// still provides scene illumination. In main.cpp we align the visible
-// sun with the rect light's normal so they "point" the same way.
+// NOTE: Background only (no lighting). Your rect area light still illuminates the scene.
+// main.cpp can align the visible sun with the rect light's normal.
 class Sky {
 public:
     explicit Sky(double sun_az_deg = 300.0,
@@ -21,8 +20,14 @@ public:
         set_sun_dir(sun_az_deg, sun_elev_deg);
     }
 
-    // Change overall intensity after construction
+    // Overall intensity
     void set_gain(double g) { gain_ = g; }
+
+    // Convenience alias for CLI: set by azimuth/elevation (degrees)
+    void set_angles(double sun_az_deg, double sun_elev_deg) { set_sun_dir(sun_az_deg, sun_elev_deg); }
+
+    // Allow CLI to change turbidity (subtle/unused unless you fold it into eval)
+    void set_turbidity(double t) { turb_ = t; }
 
     // Set by azimuth/elevation (degrees)
     void set_sun_dir(double sun_az_deg, double sun_elev_deg) {
@@ -33,14 +38,14 @@ public:
                                   std::cos(el)*std::sin(az)));
     }
 
-    // Set directly from a world-space direction (e.g., your rect-light normal)
+    // Set directly from a world-space direction (e.g., rect-light normal)
     void set_sun_from_dir(const Vec3& d) { sun_dir_ = normalize(d); }
 
-    // Background radiance toward 'dir_ws'
+    // Background radiance toward dir_ws
     Vec3 eval(const Vec3& dir_ws) const {
         const Vec3 dir = normalize(dir_ws);
 
-        // Richer blue gradient: t = 0 at nadir, 1 at zenith
+        // Blue gradient: t = 0 at nadir, 1 at zenith
         const double t = 0.5 * (dir.y + 1.0);
         const Vec3 horizon(0.72, 0.82, 1.00);
         const Vec3 zenith (0.22, 0.48, 1.15);
@@ -74,7 +79,7 @@ public:
     }
 
 private:
-    Vec3  sun_dir_;
-    double turb_;
-    double gain_;
+    Vec3  sun_dir_{0,1,0};
+    double turb_{3.5};
+    double gain_{1.0};
 };

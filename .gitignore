@@ -1,6 +1,6 @@
 # Build folders
-build/
-out/
+/build/
+/out/
 /dist/
 
 # Compiled object files

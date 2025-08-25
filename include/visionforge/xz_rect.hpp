@@ -32,10 +32,12 @@ public:
     }
 
     double area() const { return (x1 - x0) * (z1 - z0); }
-    Vec3   sample_point() const {
+
+    // For use as an emissive area light (ceiling at y=k shining downward)
+    Vec3 sample_point() const {
         return Vec3(random_double(x0, x1), k, random_double(z0, z1));
     }
-    Vec3   light_normal() const { return Vec3(0,-1,0); }
+    Vec3 light_normal() const { return Vec3(0,-1,0); } // -Y
 
     bool bounding_box(AABB& out_box) const override {
         out_box = AABB(Vec3(x0, k - THICK, z0), Vec3(x1, k + THICK, z1));

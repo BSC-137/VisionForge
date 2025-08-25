@@ -32,6 +32,14 @@ public:
 
     double area() const { return (x1 - x0) * (y1 - y0); }
 
+    // For use as an emissive area light
+    Vec3 sample_point() const {
+        double x = random_double(x0, x1);
+        double y = random_double(y0, y1);
+        return Vec3(x, y, k);
+    }
+    Vec3 light_normal() const { return Vec3(0,0,1); } // +Z
+
     bool bounding_box(AABB& out_box) const override {
         out_box = AABB(Vec3(x0, y0, k - THICK), Vec3(x1, y1, k + THICK));
         return true;
