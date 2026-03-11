@@ -1,28 +1,28 @@
 # VisionForge
 
-**VisionForge** is a physically‑based CPU path tracer written in modern C++. It’s built for both **learning** and **synthetic dataset generation**. You can preview quickly with lightweight settings, or render high‑quality outputs with YOLO/COCO labels and per‑pixel masks.
-
-The demo scene features a procedural sand dune, color‑coded cubes, a soft rectangular sun light, and a visible sky with a sun disc aligned to the key light.
+**VisionForge** is a high-performance Spatial AI engine built on a physically-based CPU path tracer in modern C++20. It renders synthetic scenes and exports ground-truth data -- RGB images, depth maps, surface normals, instance masks, and object labels -- for training and evaluating spatial perception models.
 
 ---
 
 ## Highlights
 
-* **Unbiased path tracing** (Monte Carlo) with Russian roulette
-* **Materials**: Lambertian (diffuse) + emissive area light
-* **Geometry**: AABB rectangles, cubes (from rects), triangles, procedural heightfield terrain
-* **Acceleration**: BVH for fast ray–scene intersections
-* **Sky**: Analytic daytime sky with visible sun disc + warm halo
-* **Area lights**: Rectangular emitter for soft shadows
-* **Adaptive sampling** per pixel for efficient noise reduction
-* **Dataset/labels out of the box**
-
-  * RGB (PPM)
-  * Per‑pixel **instance mask** (`inst.pgm`)
+* **Unbiased path tracing** (Monte Carlo) with Russian roulette and adaptive sampling
+* **Materials**: Lambertian diffuse, dielectric, metal, emissive area lights
+* **Geometry**: OBJ mesh loading (via fast\_obj), triangles, AABB rectangles, spheres, procedural heightfield terrain
+* **Acceleration**: BVH (bounding volume hierarchy) over all scene primitives
+* **Sky**: Analytic daytime sky with visible sun disc and warm halo
+* **Mesh pipeline**: `Mesh` class loads `.obj` files, builds a per-mesh BVH of `MeshTriangle` primitives that reference shared vertex buffers for memory efficiency
+* **G-Buffer export**: Per-pixel linear depth and world-space normals exported as 32-bit float OpenEXR
+* **Fast depth-only mode**: Single primary-ray pass (`--depth-only`) for ground-truth spatial data at interactive speeds
+* **OpenMP parallelization** across all render paths
+* **Dataset outputs out of the box**:
+  * RGB image (PPM)
+  * Multi-channel EXR (`gbuffer.exr`) with `Depth`, `Normal.X`, `Normal.Y`, `Normal.Z`
+  * Per-pixel instance mask (`inst.pgm`)
   * 2D bounding boxes from mask (`labels_from_mask.csv/json`)
   * YOLO labels (`labels_yolo.txt`)
   * COCO annotations (`labels_coco.json`)
-  * Projected boxes (`bboxes.csv/json`) for reference
+  * Projected boxes (`bboxes.csv/json`)
   * Render metadata (`manifest.json`)
 
 ---
@@ -31,13 +31,25 @@ The demo scene features a procedural sand dune, color‑coded cubes, a soft rect
 
 ```
 VisionForge/
-├─ apps/visionforge/           # CLI app (main.cpp)
-├─ include/visionforge/        # Public headers (math, geometry, sky, etc.)
-├─ src/io/                     # Output helpers (EXR scaffold)
-├─ third_party/                # External libs
-├─ build/                      # CMake build tree (generated)
-├─ out/                        # Render outputs (generated)
+├─ apps/visionforge/main.cpp       # CLI application
+├─ include/visionforge/            # Engine headers
+│  ├─ mesh.hpp                     #   OBJ mesh loader (Hittable, internal BVH)
+│  ├─ mesh_triangle.hpp            #   MeshData + MeshTriangle (shared vertex refs)
+│  ├─ triangle.hpp                 #   Standalone triangle (terrain)
+│  ├─ bvh.hpp                      #   BVH node
+│  ├─ passes.hpp                   #   GBuffer (depth, normals, instance IDs)
+│  ├─ exr_writer.hpp               #   EXR export declarations
+│  └─ ...                          #   materials, camera, sky, labels, transforms
+├─ src/io/
+│  ├─ exr_writer.cpp               # TinyEXR implementation (RGB, float, G-Buffer EXR)
+│  └─ fast_obj.cpp                 # fast_obj implementation unit
+├─ third_party/
+│  ├─ tinyexr.h                    # Single-header OpenEXR (MIT)
+│  ├─ fast_obj.h                   # Single-header OBJ loader (MIT)
+│  └─ CLI11/                       # CLI11 (vendored)
+├─ build/                          # CMake build tree (generated)
 ├─ CMakeLists.txt
+├─ LICENSE                         # BSD-3-Clause
 └─ README.md
 ```
 
@@ -49,32 +61,30 @@ VisionForge/
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake zlib1g-dev imagemagick
+sudo apt install -y build-essential cmake zlib1g-dev
 ```
 
-Optional: a compiler with **OpenMP** support (GCC/Clang/MSVC) for multithreaded sampling.
+Optional: **ImageMagick** (`imagemagick`) to convert PPM output to PNG.
 
-**Windows**: Build via CMake + MSVC or use WSL (recommended).
+A compiler with **OpenMP** support (GCC, Clang, or MSVC) enables multithreaded rendering.
+
+**Windows**: Build via CMake + MSVC or use WSL.
 
 ---
 
 ## Build
 
 ```bash
-# From the repo root
-rm -rf build
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVISIONFORGE_OMP=ON
 cmake --build build -j
 ```
 
-The executable is written to: `./build/visionforge`
+The executable is written to `./build/visionforge`.
 
-> The CMake option `VISIONFORGE_OMP=ON` enables OpenMP if your compiler supports it and defines `VF_USE_OMP` for the code path that parallelizes sampling.
-
-### Use all CPU cores at runtime (optional)
+### OpenMP tuning (optional)
 
 ```bash
-export OMP_NUM_THREADS="$(nproc)"   # Linux/WSL/macOS
+export OMP_NUM_THREADS="$(nproc)"
 export OMP_PROC_BIND=spread
 export OMP_PLACES=cores
 ```
@@ -83,25 +93,47 @@ export OMP_PLACES=cores
 
 ## Quick Start
 
-Minimal render (720p, low SPP, reasonable depth):
+**Render with default scene (720p, 24 spp):**
 
 ```bash
-./build/visionforge --out out \
-  --width 1280 --height 720 \
-  --spp 24 --max-depth 10 --seed 42
+./build/visionforge --out out --spp 24 --max-depth 10 --seed 42
 ```
 
-Outputs are written into `out/` and overwritten each run:
+**Load an OBJ mesh into the scene:**
 
-* `image.ppm` – tonemapped RGB image (ACES + sqrt gamma)
-* `inst.pgm` – per‑pixel instance mask (uint32 IDs)
-* `labels_from_mask.csv/json` – tight bounding boxes per object
-* `labels_yolo.txt` – YOLO labels
-* `labels_coco.json` – COCO annotations
-* `bboxes.csv/json` – projected cube boxes (analytic; comparison only)
-* `manifest.json` – render metadata (spp, timing, seed, etc.)
+```bash
+./build/visionforge --out out --spp 24 \
+  --obj model.obj --obj-pos "0,2,0" --obj-scale 3.0 --obj-color blue
+```
 
-Convert PPM → PNG (optional):
+**Export G-Buffer EXR alongside the render:**
+
+```bash
+./build/visionforge --out out --spp 24 --exr
+```
+
+**Fast depth-only pass (no shading, 1 spp):**
+
+```bash
+./build/visionforge --out out --depth-only
+```
+
+Outputs are written into the `--out` directory:
+
+| File | Description |
+|------|-------------|
+| `image.ppm` | Tonemapped RGB (ACES + sqrt gamma) |
+| `gbuffer.exr` | 32-bit float EXR: Depth + Normal.X/Y/Z channels (with `--exr` or `--depth-only`) |
+| `inst.pgm` | Per-pixel instance mask |
+| `labels_from_mask.csv/json` | Tight bounding boxes per object |
+| `labels_yolo.txt` | YOLO-format labels |
+| `labels_coco.json` | COCO annotations |
+| `bboxes.csv/json` | Projected cube boxes (analytic) |
+| `manifest.json` | Render metadata (spp, timing, seed) |
+
+When `--depth-only` is used, only `gbuffer.exr` and `manifest.json` are written.
+
+Convert PPM to PNG (optional):
 
 ```bash
 magick convert out/image.ppm out/image.png
@@ -109,174 +141,141 @@ magick convert out/image.ppm out/image.png
 
 ---
 
-## Using the CLI
+## CLI Reference
 
-The `visionforge` CLI lets you control **camera**, **terrain & sand**, **cubes (count/colors/placement)**, and **lighting/sky**. All parameters are optional; sensible defaults are provided.
+### Render
 
-### Syntax & Conventions
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--out` | string | `out` | Output directory |
+| `--width`, `--height` | int | `1280`, `720` | Image resolution |
+| `--spp` | int | `96` | Samples per pixel |
+| `--max-depth` | int | `16` | Maximum bounce depth |
+| `--preview` | flag | off | Fast preset (spp 12, depth 6, fewer light samples) |
+| `--seed` | int | `1337` | RNG seed |
+| `--exposure` | float | `6.5` | Exposure multiplier before tonemapping |
+| `--sky-gain` | float | `45` | Sky brightness |
+| `--exr` | flag | off | Write `gbuffer.exr` (depth + normals) |
+| `--depth-only` | flag | off | Primary-ray-only pass; implies `--exr`, skips shading and label outputs |
 
-* **Booleans**: `--flag` (present = true) or `--flag true|false`
-* **CSV triples**: `"x,y,z"` (quote if the argument contains commas)
-* **Ranges**: `"a,b"` (e.g., `--light-y "2,14"`)
-* **Colors** (any of):
+### Camera
 
-  * name: `red`, `blue`, `white`
-  * hex: `#ffaa00`
-  * rgb triple: `0.1,0.2,0.9`
-  * multiple entries: comma‑separate names/hex; if using raw RGB triples use **semicolons** to separate entries, e.g. `"red;#3cb371;0.1,0.2,0.9"` (requires the semicolon‑aware color parser).
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--lookfrom` | `x,y,z` | `18,8,24` | Camera position |
+| `--lookat` | `x,y,z` | `0,1.2,0` | Look-at target |
+| `--fov` | deg | `35` | Vertical field of view |
 
-> To **overwrite** outputs each run, keep `--out out` (the default) or use the same folder. To start fresh: `rm -f out/*` before rendering.
+### Terrain & sand
 
-### Parameters (what each does)
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--terrain-amp` | float | `1.8` | Dune height amplitude |
+| `--terrain-scale` | float | `0.14` | Feature size (smaller = busier dunes) |
+| `--terrain-nx`, `--terrain-nz` | int | `96` | Heightfield tessellation |
+| `--sand-bump-freq` | float | `5.0` | Micro-bump frequency |
+| `--sand-bump-scale` | float | `0.22` | Micro-bump strength |
+| `--world-bounds` | `xmin,xmax,zmin,zmax` | `-22,22,-22,22` | World extents |
 
-#### Global render
+### Cubes
 
-| Flag                  | Type   | Meaning                                             | Default      |
-| --------------------- | ------ | --------------------------------------------------- | ------------ |
-| `--out`               | string | Output directory (PPM, masks, labels).              | `out`        |
-| `--width`, `--height` | int    | Image resolution in pixels.                         | `1280 × 720` |
-| `--spp`               | int    | Target samples per pixel (noise ≈ 1/√SPP).          | `96`         |
-| `--max-depth`         | int    | Maximum bounce depth.                               | `16`         |
-| `--preview`           | flag   | Fast preset (spp 12, depth 6, fewer light samples). | off          |
-| `--seed`              | int    | RNG seed (change to reroll layouts).                | `1337`       |
-| `--exposure`          | float  | Exposure multiplier before tone‑map.                | `6.5`        |
-| `--sky-gain`          | float  | Visible sky brightness (background only).           | `45`         |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--cubes` | int | `4` | Number of cubes |
+| `--cube-edge-min`, `--cube-edge-max` | float | `1.4`, `1.9` | Edge length range |
+| `--cube-colors` | list | `red,green,blue,white` | Colors, cycled across cubes |
+| `--placement` | enum | `grid` | `grid` or `random` |
+| `--min-spacing` | float | `3.5` | Min separation (random mode) |
+| `--tilt-abs` | deg | `12` | Max random tilt |
 
-#### Camera
+### OBJ Mesh Loading
 
-| Flag         | Type    | Meaning                      | Default   |
-| ------------ | ------- | ---------------------------- | --------- |
-| `--lookfrom` | `x,y,z` | Camera position.             | `18,8,24` |
-| `--lookat`   | `x,y,z` | Target point in world space. | `0,1.2,0` |
-| `--fov`      | deg     | Vertical field of view.      | `35`      |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--obj` | path | | OBJ file to load |
+| `--obj-pos` | `x,y,z` | `0,0,0` | World-space translation |
+| `--obj-scale` | float | `1.0` | Uniform scale factor |
+| `--obj-color` | color | `white` | Material color (name, `#hex`, or `r,g,b`) |
 
-#### Terrain & sand
+### Lighting & sky
 
-| Flag                           | Type  | Meaning                                | Default          |
-| ------------------------------ | ----- | -------------------------------------- | ---------------- |
-| `--terrain-amp`                | float | Dune height amplitude.                 | `1.8`            |
-| `--terrain-scale`              | float | Feature size (smaller → busier dunes). | `0.14`           |
-| `--terrain-nx`, `--terrain-nz` | int   | Tessellation of the heightfield grid.  | `96`, `96`       |
-| `--sand-bump-freq`             | float | Micro‑bump frequency; `0` disables.    | `5.0` (example)  |
-| `--sand-bump-scale`            | float | Micro‑bump strength; `0` disables.     | `0.22` (example) |
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--light-x` | float | `-30` | X position of area light |
+| `--light-y` | `y0,y1` | `2,14` | Vertical span |
+| `--light-z` | `z0,z1` | `-25,25` | Depth span |
+| `--light-intensity` | float | `8000` | Radiance multiplier |
+| `--light-color` | color | `1,0.98,0.92` | Emissive color |
+| `--show-light` | bool | `false` | Show rect light to camera |
+| `--match-sky` | bool | `true` | Align sun direction to light normal |
+| `--sun-az`, `--sun-el` | deg | `300`, `12` | Sun azimuth / elevation |
+| `--turbidity` | float | `3.5` | Sky haze |
 
-> **Speed tip**: For quick iterations use `--terrain-nx 80 --terrain-nz 80` and `--sand-bump-scale 0.10–0.15`.
+### Color syntax
 
-#### Cubes (objects)
-
-| Flag                                 | Type  | Meaning                                                                                        | Default                |
-| ------------------------------------ | ----- | ---------------------------------------------------------------------------------------------- | ---------------------- |
-| `--cubes`                            | int   | Number of cubes.                                                                               | `4`                    |
-| `--cube-edge-min`, `--cube-edge-max` | float | Edge length range.                                                                             | `1.4, 1.9`             |
-| `--cube-colors`                      | list  | Colors used cyclically for cubes. Names/hex; raw RGB triples allowed when semicolon‑separated. | `red,green,blue,white` |
-| `--placement`                        | enum  | `grid` or `random`.                                                                            | `grid`                 |
-| `--min-spacing`                      | float | Minimum separation for random placement.                                                       | (sensible default)     |
-| `--tilt-abs`                         | deg   | Max random tilt about X/Z (±).                                                                 | `12`                   |
-
-#### Lighting & sky
-
-| Flag                   | Type    | Meaning                                                               | Default       |
-| ---------------------- | ------- | --------------------------------------------------------------------- | ------------- |
-| `--light-x`            | float   | X position of the wall light (YZ rect at x=k).                        | `-30`         |
-| `--light-y`            | `y0,y1` | Vertical span of the rect.                                            | `2,14`        |
-| `--light-z`            | `z0,z1` | Depth span of the rect.                                               | `-25,25`      |
-| `--light-intensity`    | float   | Radiance multiplier of the rect light.                                | `8000`        |
-| `--light-color`        | color   | Emissive color (name / `#hex` / `r,g,b`).                             | `1,0.98,0.92` |
-| `--show-light`         | bool    | If true, show the rect to the camera (otherwise hidden so sky shows). | `false`       |
-| `--match-sky`          | bool    | Align the visible sun direction to the rect’s normal.                 | `true`        |
-| `--sun-az`, `--sun-el` | deg     | Sun azimuth / elevation for the visible sky.                          | `300, 12`     |
-| `--turbidity`          | float   | Haze of the sky model (higher = hazier/warmer).                       | `3.5`         |
-
-#### Advanced variance controls *(optional, if enabled in your build)*
-
-| Flag              | Type  | Meaning                                                      |
-| ----------------- | ----- | ------------------------------------------------------------ |
-| `--noise-target`  | float | Relative 95% CI target per pixel (e.g., `0.04` = 4%).        |
-| `--min-spp`       | int   | Minimum spp before early‑stop can trigger.                   |
-| `--light-samples` | int   | Shadow rays per hit for direct lighting (quality vs. speed). |
+Colors can be specified as:
+* Name: `red`, `blue`, `white`, `sand`, `yellow`, `magenta`, `cyan`, `gray`
+* Hex: `#ffaa00`
+* RGB triple: `0.1,0.2,0.9`
+* Multiple entries: comma-separate names/hex, or use semicolons when mixing with raw RGB triples (`"red;#3cb371;0.1,0.2,0.9"`)
 
 ---
 
-## Recipes (copy‑paste)
+## Recipes
 
-**A) “Fast‑but‑pretty” baseline (720p, spp 24, depth 10):**
+**Fast preview while iterating:**
 
 ```bash
-./build/visionforge --out out \
-  --width 1280 --height 720 \
-  --spp 24 --max-depth 10 --seed 42 \
-  --exposure 6.2 --sky-gain 45 \
-  --lookfrom "-28,8,6" --lookat "12,3,0" --fov 35
+./build/visionforge --out out --preview --width 960 --height 540 --seed $RANDOM
 ```
 
-**B) Two colors, 6 cubes, random placement, new camera & light:**
+**6 cubes, random placement, custom camera:**
 
 ```bash
-./build/visionforge --out out \
-  --width 1280 --height 720 --spp 24 --max-depth 10 --seed 4242 \
-  --exposure 6.2 --sky-gain 45 \
+./build/visionforge --out out --spp 24 --max-depth 10 --seed 4242 \
   --lookfrom "12,10,-26" --lookat "0,2,0" --fov 33 \
-  --terrain-amp 1.8 --terrain-scale 0.14 --terrain-nx 80 --terrain-nz 80 \
-  --sand-bump-freq 3.5 --sand-bump-scale 0.12 \
-  --cubes 6 --placement random --min-spacing 4.0 \
-  --cube-edge-min 1.6 --cube-edge-max 1.9 \
-  --cube-colors red,blue \
-  --tilt-abs 12 \
-  --sun-az 235 --sun-el 10 --turbidity 4.0 \
-  --light-x -26 --light-y "3,13" --light-z "-18,18" \
-  --light-color "#ffd7a0" --light-intensity 5000 \
-  --match-sky true --show-light false
+  --cubes 6 --placement random --cube-colors red,blue \
+  --terrain-nx 80 --terrain-nz 80
 ```
 
-**C) 4 cubes (2 red, 2 blue), grid placement, different look:**
+**OBJ mesh with depth export:**
 
 ```bash
-./build/visionforge --out out \
-  --width 1280 --height 720 --spp 24 --max-depth 10 --seed 202 \
-  --exposure 6.2 --sky-gain 45 \
-  --lookfrom "-20,9,-16" --lookat "0,2,0" --fov 32 \
-  --terrain-amp 1.8 --terrain-scale 0.14 --terrain-nx 80 --terrain-nz 80 \
-  --sand-bump-freq 3.5 --sand-bump-scale 0.12 \
-  --cubes 4 --placement grid \
-  --cube-edge-min 1.6 --cube-edge-max 1.9 \
-  --cube-colors red,blue,red,blue \
-  --tilt-abs 10 \
-  --sun-az 255 --sun-el 9 --turbidity 4.5 \
-  --light-x -28 --light-y "2,12" --light-z "-20,20" \
-  --light-color "#ffd7a0" --light-intensity 5200 \
-  --match-sky true --show-light false
+./build/visionforge --out out --spp 32 --exr \
+  --obj model.obj --obj-pos "0,2,0" --obj-scale 2.5 --obj-color "#3cb371"
 ```
 
-**D) Super‑fast preview while iterating:**
+**Batch depth-only for dataset generation:**
 
 ```bash
-./build/visionforge --out out \
-  --preview --width 960 --height 540 --seed $RANDOM \
-  --cube-colors red,blue --cubes 6 --placement random
+for seed in $(seq 1 100); do
+  ./build/visionforge --depth-only --seed $seed --out "data/frame_${seed}" \
+    --cubes 6 --placement random
+done
 ```
 
 ---
 
 ## Performance Tips
 
-* Build in **Release**.
-* Use `--preview` and/or a smaller resolution while composing.
-* For speed, try: `--spp 24–48`, `--max-depth 8–12`, `--light-samples 2–3` (if supported).
-* Sand micro‑bump increases variance; lower `--sand-bump-scale` if you need cleaner images at low SPP.
-* Terrain tessellation (`--terrain-nx/nz`) trades triangle count for detail; 64–96 is a good range.
+* Build in **Release** mode.
+* Use `--preview` or smaller resolution while iterating on scene composition.
+* `--depth-only` is roughly 25x faster than a full render -- use it when you only need spatial ground truth.
+* Lower `--terrain-nx/nz` (e.g. 64-80) for faster scene builds.
+* Lower `--sand-bump-scale` reduces variance at low SPP.
 
 ---
 
 ## Troubleshooting
 
-* **Dark image** → raise `--exposure` (e.g., 8–10).
-* **Sky too bright/dim** → adjust `--sky-gain`.
-* **Noisy output** → increase `--spp`, or lower bump scale, or reduce `--light-intensity` contrast.
-* **"Bad color token" warnings** → use color names/hex codes, or separate RGB triples with semicolons.
-* **Nothing in `out/`** → double‑check `--out out` and that the app had write permissions.
+* **Dark image** -- raise `--exposure` (e.g. 8-10).
+* **Sky too bright/dim** -- adjust `--sky-gain`.
+* **Noisy** -- increase `--spp`, lower `--sand-bump-scale`, or reduce light intensity contrast.
+* **"Bad color token" warnings** -- use color names or hex codes; separate RGB triples with semicolons.
+* **OBJ won't load** -- check the path is correct and the file contains at least one face.
 
 ---
 
 ## License
 
-BSD‑3‑Clause. See `LICENSE`.
+BSD-3-Clause. See `LICENSE`.
