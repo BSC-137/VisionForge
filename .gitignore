@@ -1,45 +1,66 @@
-# Build folders
-/build/
-/out/
-/dist/
+# Build & Distribution
+build/
+dist/
+bin/
 
-# Compiled object files
+# Render Outputs (The "Data" - keep this out of Git)
+out/
+temp_out/
+test_out/
+visionforge_data/
+runs/
+
+# Images & Data Files
+*.ppm
+*.pgm
+*.exr
+*.png
+*.jpg
+*.jpeg
+*.csv
+*.json
+!data.yaml      # Keep config files, ignore the data
+!scene.json     # Keep your scene definitions
+
+# Compiled Object Files & Libraries
 *.o
 *.obj
-*.lo
+*.so
+*.dylib
+*.dll
+*.lib
+*.a
 *.la
-*.al
-*.libs
+*.lo
 
-# Compiled binary executables
+# Executables
+visionforge
 *.exe
 *.out
 *.app
 
-# Shared libraries
-*.so
-*.so.*
-*.dylib
-*.dll
+# Python / ML artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+*.pt            # Ignore model weights (keep these on a bucket/drive)
+*.onnx
 
-# PPM/EXR images
-*.ppm
-*.exr
-
-# Logs
-*.log
-
-# IDE / editor configs
+# IDEs & Editors
 .vscode/
 .idea/
+.DS_Store
 *.swp
 *.swo
 
-# CMake cache
+# CMake Generated Files
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
-
-# Misc
-*.tmp
+CPackConfig.cmake
+CPackSourceConfig.cmake
+install_manifest.txt

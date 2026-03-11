@@ -40,6 +40,7 @@
 #include "visionforge/triangle.hpp"
 #include "visionforge/transform.hpp"
 #include "visionforge/mesh.hpp"
+#include "visionforge/exr_writer.hpp"
 
 
 #ifndef PI
@@ -202,6 +203,10 @@ struct Opts {
     double obj_scale = 1.0;
     std::string obj_color = "white";
 
+    // EXR / depth export
+    bool write_exr  = false;
+    bool depth_only = false;
+
     // Dataset toggles (keeping default on)
     bool write_bbox_overlay = true;
 };
@@ -227,6 +232,7 @@ Usage:
               [--show-light true|false] [--match-sky true|false]
               [--obj PATH] [--obj-pos "x,y,z"] [--obj-scale S]
               [--obj-color "name|#hex|r,g,b"]
+              [--exr] [--depth-only]
               [--help]
 
 Examples:
@@ -292,6 +298,9 @@ static Opts parse(int argc, char** argv) {
         else if (a=="--obj-pos")        { Vec3 v; if(!parse_vec3_csv(argv[need(i)],v)){ std::cerr<<"Bad --obj-pos\n"; std::exit(2);} o.obj_pos=v; }
         else if (a=="--obj-scale")       o.obj_scale = std::stod(argv[need(i)]);
         else if (a=="--obj-color")       o.obj_color = argv[need(i)];
+
+        else if (a=="--exr")             o.write_exr = true;
+        else if (a=="--depth-only")    { o.depth_only = true; o.write_exr = true; }
 
         else if (a=="--help" || a=="-h"){ print_usage(); std::exit(0); }
         else { std::cerr << "Unknown flag: " << a << "\n"; print_usage(); std::exit(2); }
@@ -415,20 +424,40 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
 
     // sky on miss (primary only)
     if (!world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
+        if (depth == max_depth && gbuf) {
+            gbuf->depth[pix_index]    = 1e30f;
+            gbuf->normal_x[pix_index] = 0.0f;
+            gbuf->normal_y[pix_index] = 0.0f;
+            gbuf->normal_z[pix_index] = 0.0f;
+        }
         if (depth == max_depth) return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
         return Vec3(0,0,0);
     }
 
-    // write instance id for primary
+    // write G-Buffer for primary ray
     if (depth == max_depth && gbuf) {
         uint32_t inst = (rec.hit_object ? rec.hit_object->obj.instance_id : 0);
         gbuf->inst_id[pix_index] = inst;
+
+        float lin_depth = float((rec.point - r.origin).length());
+        gbuf->depth[pix_index]    = lin_depth;
+        gbuf->normal_x[pix_index] = float(rec.normal.x);
+        gbuf->normal_y[pix_index] = float(rec.normal.y);
+        gbuf->normal_z[pix_index] = float(rec.normal.z);
     }
 
     // optionally hide emissive rect from primary (so we see sky)
     if (!show_light_on_primary && depth == max_depth) {
-        if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr)
+        if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr) {
+            if (gbuf) {
+                gbuf->inst_id[pix_index]  = 0;
+                gbuf->depth[pix_index]    = 1e30f;
+                gbuf->normal_x[pix_index] = 0.0f;
+                gbuf->normal_y[pix_index] = 0.0f;
+                gbuf->normal_z[pix_index] = 0.0f;
+            }
             return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
+        }
     }
 
     // micro bump only for sand material; frequency/scale set later via globals
@@ -762,119 +791,169 @@ int main(int argc, char** argv) {
 
     long long spp_accum = 0;
 
-    #if defined(VF_USE_OMP)
-      #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
-    #endif
-    for (int j = height - 1; j >= 0; --j) {
-        for (int i = 0; i < width; ++i) {
-            Vec3 sum(0,0,0);
-            double meanL = 0.0, M2 = 0.0;
-            int s = 0;
-            int pix_index = ((height-1-j)*width + i);
-            for (; s < spp_target; ++s) {
-                double u = (i + random_double()) / (width  - 1);
-                double v = (j + random_double()) / (height - 1);
+    if (o.depth_only) {
+        // Fast primary-ray-only pass: 1 spp, no shading -- ground-truth depth & normals
+        #if defined(VF_USE_OMP)
+          #pragma omp parallel for schedule(dynamic, 1)
+        #endif
+        for (int j = height - 1; j >= 0; --j) {
+            for (int i = 0; i < width; ++i) {
+                int pix_index = ((height-1-j)*width + i);
+                double u = (i + 0.5) / (width  - 1);
+                double v = (j + 0.5) / (height - 1);
                 Ray r = cam.get_ray(u, v);
-                Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
-                                   PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
-                                   MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
-                                   o.show_light_on_primary, &gbuf, pix_index);
-                sum += c;
-
-                // adaptive stop
-                double L = luminance(c);
-                double delta = L - meanL; meanL += delta / double(s+1); M2 += delta * (L - meanL);
-                if (s+1 >= MIN_SPP) {
-                    double var = (s > 0) ? (M2 / s) : 0.0;
-                    double sigma = std::sqrt(std::max(0.0, var));
-                    double ci95  = 1.96 * sigma / std::sqrt(double(s+1));
-                    if (ci95 < REL_NOISE_TARGET * std::max(1e-3, meanL)) break;
+                HitRecord rec;
+                if (world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
+                    bool is_hidden_light = !o.show_light_on_primary
+                                           && dynamic_cast<DiffuseLight*>(rec.mat.get());
+                    if (is_hidden_light) {
+                        gbuf.depth[pix_index]    = 1e30f;
+                        gbuf.normal_x[pix_index] = 0.0f;
+                        gbuf.normal_y[pix_index] = 0.0f;
+                        gbuf.normal_z[pix_index] = 0.0f;
+                    } else {
+                        gbuf.inst_id[pix_index]  = rec.hit_object ? rec.hit_object->obj.instance_id : 0;
+                        gbuf.depth[pix_index]    = float((rec.point - r.origin).length());
+                        gbuf.normal_x[pix_index] = float(rec.normal.x);
+                        gbuf.normal_y[pix_index] = float(rec.normal.y);
+                        gbuf.normal_z[pix_index] = float(rec.normal.z);
+                    }
+                } else {
+                    gbuf.depth[pix_index]    = 1e30f;
+                    gbuf.normal_x[pix_index] = 0.0f;
+                    gbuf.normal_y[pix_index] = 0.0f;
+                    gbuf.normal_z[pix_index] = 0.0f;
                 }
             }
-            spp_accum += (s+1);
+        }
+        spp_accum = (long long)width * height;
+    } else {
+        // Full path-tracing pass
+        #if defined(VF_USE_OMP)
+          #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
+        #endif
+        for (int j = height - 1; j >= 0; --j) {
+            for (int i = 0; i < width; ++i) {
+                Vec3 sum(0,0,0);
+                double meanL = 0.0, M2 = 0.0;
+                int s = 0;
+                int pix_index = ((height-1-j)*width + i);
+                for (; s < spp_target; ++s) {
+                    double u = (i + random_double()) / (width  - 1);
+                    double v = (j + random_double()) / (height - 1);
+                    Ray r = cam.get_ray(u, v);
+                    Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
+                                       PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                       MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
+                                       o.show_light_on_primary, &gbuf, pix_index);
+                    sum += c;
 
-            Vec3 pixel = (sum / double(s+1)) * exposure;
-            Vec3 mapped = aces_tonemap(pixel);
-            mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
-            int idx = pix_index*3;
-            fb[idx+0] = (unsigned char)(256 * clamp01(mapped.x));
-            fb[idx+1] = (unsigned char)(256 * clamp01(mapped.y));
-            fb[idx+2] = (unsigned char)(256 * clamp01(mapped.z));
+                    // adaptive stop
+                    double L = luminance(c);
+                    double delta = L - meanL; meanL += delta / double(s+1); M2 += delta * (L - meanL);
+                    if (s+1 >= MIN_SPP) {
+                        double var = (s > 0) ? (M2 / s) : 0.0;
+                        double sigma = std::sqrt(std::max(0.0, var));
+                        double ci95  = 1.96 * sigma / std::sqrt(double(s+1));
+                        if (ci95 < REL_NOISE_TARGET * std::max(1e-3, meanL)) break;
+                    }
+                }
+                spp_accum += (s+1);
+
+                Vec3 pixel = (sum / double(s+1)) * exposure;
+                Vec3 mapped = aces_tonemap(pixel);
+                mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
+                int idx = pix_index*3;
+                fb[idx+0] = (unsigned char)(256 * clamp01(mapped.x));
+                fb[idx+1] = (unsigned char)(256 * clamp01(mapped.y));
+                fb[idx+2] = (unsigned char)(256 * clamp01(mapped.z));
+            }
         }
     }
 
-    // 2D bbox overlay from analytic cube OBBs
-    std::vector<Box2D> boxes; boxes.reserve(cubes.size());
-    for (auto& pose : cubes){
-        Box2D b = cube_bbox_screen_rot(camBasis, /*pose*/{pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
-        if (b.valid) boxes.push_back(b);
+    // EXR G-Buffer export (always written when --exr or --depth-only)
+    if (o.write_exr) {
+        std::string exr_path = o.out + "/gbuffer.exr";
+        if (vf::write_gbuffer_exr(exr_path.c_str(), gbuf))
+            std::cout << "Wrote " << exr_path << "\n";
+        else
+            std::cerr << "Error writing " << exr_path << "\n";
     }
-    if (o.write_bbox_overlay){
-        for (auto& b : boxes) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
-    }
 
-    // write outputs
-    const std::string ppm  = o.out + "/image.ppm";
-    const std::string csv  = o.out + "/bboxes.csv";
-    const std::string json = o.out + "/bboxes.json";
-
-    std::ofstream file(ppm, std::ios::binary);
-    file << "P6\n" << width << " " << height << "\n255\n";
-    file.write(reinterpret_cast<const char*>(fb.data()), fb.size());
-    std::cout << "Wrote " << ppm << "\n";
-
-    {
-        std::ofstream c(csv);
-        c << "label,xmin,ymin,xmax,ymax,width,height\n";
-        for (auto& b : boxes){
-            c << b.label << "," << b.x0 << "," << b.y0 << "," << b.x1 << "," << b.y1
-              << "," << width << "," << height << "\n";
+    if (!o.depth_only) {
+        // 2D bbox overlay from analytic cube OBBs
+        std::vector<Box2D> boxes; boxes.reserve(cubes.size());
+        for (auto& pose : cubes){
+            Box2D b = cube_bbox_screen_rot(camBasis, /*pose*/{pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
+            if (b.valid) boxes.push_back(b);
         }
-        std::cout << "Wrote " << csv << "\n";
-    }
-    {
-        std::ofstream j(json);
-        j << std::fixed << std::setprecision(0);
-        j << "{\n  \"image_width\": " << width << ",\n  \"image_height\": " << height << ",\n  \"boxes\": [\n";
-        for (size_t i=0;i<boxes.size();++i){
-            auto& b = boxes[i];
-            j << "    {\"label\": \"" << b.label << "\", \"xmin\": " << b.x0
-              << ", \"ymin\": " << b.y0 << ", \"xmax\": " << b.x1 << ", \"ymax\": " << b.y1 << "}";
-            if (i+1<boxes.size()) j << ",";
-            j << "\n";
+        if (o.write_bbox_overlay){
+            for (auto& b : boxes) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
         }
-        j << "  ]\n}\n";
-        std::cout << "Wrote " << json << "\n";
-    }
 
-    // Instance mask + tight boxes from mask
-    write_inst_pgm(o.out + "/inst.pgm", gbuf);
-    std::cout << "Wrote " << (o.out + "/inst.pgm") << "\n";
+        // write outputs
+        const std::string ppm  = o.out + "/image.ppm";
+        const std::string csv  = o.out + "/bboxes.csv";
+        const std::string json = o.out + "/bboxes.json";
 
-    auto tight = boxes_from_mask(gbuf, reg);
-    write_boxes_csv (o.out + "/labels_from_mask.csv",  tight, width, height);
-    write_boxes_json(o.out + "/labels_from_mask.json", tight, width, height);
-    std::cout << "Wrote labels_from_mask.{csv,json}\n";
+        std::ofstream file(ppm, std::ios::binary);
+        file << "P6\n" << width << " " << height << "\n255\n";
+        file.write(reinterpret_cast<const char*>(fb.data()), fb.size());
+        std::cout << "Wrote " << ppm << "\n";
 
-    // YOLO / COCO
-    {
-        std::vector<std::tuple<int,int,int,int,int>> yolo_boxes;
-        for (auto& b : tight) {
-            yolo_boxes.emplace_back(int(b.class_id), b.x0, b.y0, b.x1, b.y1);
+        {
+            std::ofstream c(csv);
+            c << "label,xmin,ymin,xmax,ymax,width,height\n";
+            for (auto& b : boxes){
+                c << b.label << "," << b.x0 << "," << b.y0 << "," << b.x1 << "," << b.y1
+                  << "," << width << "," << height << "\n";
+            }
+            std::cout << "Wrote " << csv << "\n";
         }
-        write_yolo_txt(o.out + "/labels_yolo.txt", width, height, yolo_boxes);
-        std::cout << "Wrote " << (o.out + "/labels_yolo.txt") << "\n";
-    }
-    {
-        CocoWriter coco;
-        coco.ensure_category(1, "cube");
-        int img_id = coco.add_image("image.ppm", width, height);
-        for (auto& b : tight) {
-            coco.add_box(img_id, b.class_id, b.x0, b.y0, b.x1, b.y1, b.instance_id, b.label);
+        {
+            std::ofstream j(json);
+            j << std::fixed << std::setprecision(0);
+            j << "{\n  \"image_width\": " << width << ",\n  \"image_height\": " << height << ",\n  \"boxes\": [\n";
+            for (size_t i=0;i<boxes.size();++i){
+                auto& b = boxes[i];
+                j << "    {\"label\": \"" << b.label << "\", \"xmin\": " << b.x0
+                  << ", \"ymin\": " << b.y0 << ", \"xmax\": " << b.x1 << ", \"ymax\": " << b.y1 << "}";
+                if (i+1<boxes.size()) j << ",";
+                j << "\n";
+            }
+            j << "  ]\n}\n";
+            std::cout << "Wrote " << json << "\n";
         }
-        coco.write(o.out + "/labels_coco.json");
-        std::cout << "Wrote " << (o.out + "/labels_coco.json") << "\n";
-    }
+
+        // Instance mask + tight boxes from mask
+        write_inst_pgm(o.out + "/inst.pgm", gbuf);
+        std::cout << "Wrote " << (o.out + "/inst.pgm") << "\n";
+
+        auto tight = boxes_from_mask(gbuf, reg);
+        write_boxes_csv (o.out + "/labels_from_mask.csv",  tight, width, height);
+        write_boxes_json(o.out + "/labels_from_mask.json", tight, width, height);
+        std::cout << "Wrote labels_from_mask.{csv,json}\n";
+
+        // YOLO / COCO
+        {
+            std::vector<std::tuple<int,int,int,int,int>> yolo_boxes;
+            for (auto& b : tight) {
+                yolo_boxes.emplace_back(int(b.class_id), b.x0, b.y0, b.x1, b.y1);
+            }
+            write_yolo_txt(o.out + "/labels_yolo.txt", width, height, yolo_boxes);
+            std::cout << "Wrote " << (o.out + "/labels_yolo.txt") << "\n";
+        }
+        {
+            CocoWriter coco;
+            coco.ensure_category(1, "cube");
+            int img_id = coco.add_image("image.ppm", width, height);
+            for (auto& b : tight) {
+                coco.add_box(img_id, b.class_id, b.x0, b.y0, b.x1, b.y1, b.instance_id, b.label);
+            }
+            coco.write(o.out + "/labels_coco.json");
+            std::cout << "Wrote " << (o.out + "/labels_coco.json") << "\n";
+        }
+    } // !depth_only
 
     auto t1 = std::chrono::high_resolution_clock::now();
     double secs = std::chrono::duration<double>(t1 - t0).count();
