@@ -1,0 +1,10 @@
+{
+  "image_width": 640,
+  "image_height": 640,
+  "boxes": [
+    {"label": "red", "xmin": 169, "ymin": 210, "xmax": 221, "ymax": 248},
+    {"label": "green", "xmin": 88, "ymin": 252, "xmax": 154, "ymax": 310},
+    {"label": "blue", "xmin": 0, "ymin": 295, "xmax": 0, "ymax": 349},
+    {"label": "white", "xmin": 0, "ymin": 365, "xmax": 0, "ymax": 446}
+  ]
+}

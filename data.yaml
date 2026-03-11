@@ -1,0 +1,10 @@
+
+path: /home/bspsdn/VisionForge/visionforge_data
+train: train/images
+val: train/images
+
+names:
+  0: red_cube
+  1: blue_cube
+  2: green_cube
+  3: white_cube

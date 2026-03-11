@@ -1,0 +1,8 @@
+{
+  "image_width": 640,
+  "image_height": 640,
+  "boxes": [
+    {"instance_id": 2, "class_id": 1, "label": "green", "xmin": 87, "ymin": 253, "xmax": 153, "ymax": 310},
+    {"instance_id": 1, "class_id": 1, "label": "red", "xmin": 168, "ymin": 210, "xmax": 220, "ymax": 246}
+  ]
+}

@@ -29,9 +29,10 @@ target_include_directories(visionforge INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
-# ---- IO (TinyEXR or your wrapper) ----
+# ---- IO (TinyEXR, fast_obj) ----
 add_library(vf_io STATIC
   src/io/exr_writer.cpp
+  src/io/fast_obj.cpp
 )
 target_include_directories(vf_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include

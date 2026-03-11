@@ -1,0 +1,10 @@
+{
+  "image_width": 800,
+  "image_height": 600,
+  "boxes": [
+    {"instance_id": 4, "class_id": 1, "label": "white", "xmin": 310, "ymin": 463, "xmax": 484, "ymax": 599},
+    {"instance_id": 3, "class_id": 1, "label": "blue", "xmin": 0, "ymin": 321, "xmax": 4, "ymax": 350},
+    {"instance_id": 2, "class_id": 1, "label": "green", "xmin": 785, "ymin": 290, "xmax": 799, "ymax": 351},
+    {"instance_id": 5, "class_id": 2, "label": "blue", "xmin": 294, "ymin": 171, "xmax": 504, "ymax": 361}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "tool": "VisionForge",
+  "width": 800,
+  "height": 600,
+  "spp_target": 32,
+  "spp_avg": 24,
+  "max_depth": 16,
+  "seed": 1337,
+  "seconds": 73.415
+}

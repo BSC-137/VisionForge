@@ -39,6 +39,7 @@
 #include "visionforge/yolo.hpp"
 #include "visionforge/triangle.hpp"
 #include "visionforge/transform.hpp"
+#include "visionforge/mesh.hpp"
 
 
 #ifndef PI
@@ -195,6 +196,12 @@ struct Opts {
     int light_samples_final   = 6;
     int spp_preview = 12;
 
+    // Mesh loading
+    std::string obj_path;
+    Vec3 obj_pos = Vec3(0, 0, 0);
+    double obj_scale = 1.0;
+    std::string obj_color = "white";
+
     // Dataset toggles (keeping default on)
     bool write_bbox_overlay = true;
 };
@@ -218,6 +225,8 @@ Usage:
               [--light-x X] [--light-y "y0,y1"] [--light-z "z0,z1"]
               [--light-color "r,g,b|#hex|name"] [--light-intensity I]
               [--show-light true|false] [--match-sky true|false]
+              [--obj PATH] [--obj-pos "x,y,z"] [--obj-scale S]
+              [--obj-color "name|#hex|r,g,b"]
               [--help]
 
 Examples:
@@ -278,6 +287,11 @@ static Opts parse(int argc, char** argv) {
         else if (a=="--light-intensity") o.light_intensity = std::stod(argv[need(i)]);
         else if (a=="--show-light")      o.show_light_on_primary = parse_bool(argv[need(i)]);
         else if (a=="--match-sky")       o.match_sky_to_light = parse_bool(argv[need(i)]);
+
+        else if (a=="--obj")             o.obj_path = argv[need(i)];
+        else if (a=="--obj-pos")        { Vec3 v; if(!parse_vec3_csv(argv[need(i)],v)){ std::cerr<<"Bad --obj-pos\n"; std::exit(2);} o.obj_pos=v; }
+        else if (a=="--obj-scale")       o.obj_scale = std::stod(argv[need(i)]);
+        else if (a=="--obj-color")       o.obj_color = argv[need(i)];
 
         else if (a=="--help" || a=="-h"){ print_usage(); std::exit(0); }
         else { std::cerr << "Unknown flag: " << a << "\n"; print_usage(); std::exit(2); }
@@ -710,6 +724,26 @@ int main(int argc, char** argv) {
 
         reg.id_to_label[id] = label;
         reg.id_to_class[id] = 1u;
+    }
+
+    // OBJ mesh loading
+    if (!o.obj_path.empty()) {
+        bool color_ok = true;
+        std::string obj_label;
+        Vec3 obj_col = parse_color_one(o.obj_color, color_ok, obj_label);
+        auto obj_mat = std::make_shared<Lambertian>(obj_col);
+
+        auto mesh = Mesh::from_obj(o.obj_path, obj_mat, o.obj_pos, o.obj_scale);
+        if (mesh) {
+            uint32_t id = next_instance_id++;
+            if (obj_label.empty()) obj_label = "mesh";
+            ObjectInfo info{ id, /*class_id=*/2u, obj_label.c_str() };
+            auto tagged = std::make_shared<Tag>(mesh, info);
+            objects.add(tagged);
+
+            reg.id_to_label[id] = obj_label;
+            reg.id_to_class[id] = 2u;
+        }
     }
 
     // tessellate sand
