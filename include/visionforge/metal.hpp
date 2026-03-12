@@ -1,12 +1,13 @@
 #pragma once
 #include "material.hpp"
 #include "vec3.hpp"
+#include <algorithm>
 
 class Metal : public Material {
 public:
     Vec3 albedo;
     double fuzz;
-    Metal(const Vec3& a, double f) : albedo(a), fuzz(f < 1 ? f : 1) {}
+    Metal(const Vec3& a, double f) : Material(a, std::clamp(f, 0.0, 1.0), 1.0), albedo(a), fuzz(f < 1 ? f : 1) {}
 
     bool scatter(const Ray& r_in, const HitRecord& rec,
                  Vec3& attenuation, Ray& scattered) const override {

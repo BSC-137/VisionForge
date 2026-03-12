@@ -1,0 +1,77 @@
+{
+  "render": {
+    "width": 320,
+    "height": 180,
+    "spp": 4,
+    "max_depth": 6,
+    "seed": 123
+  },
+  "camera": {
+    "lookat": [0.0, 1.2, 0.0],
+    "up": [0.0, 1.0, 0.0],
+    "lookfrom": {
+      "min": [14.0, 7.0, 20.0],
+      "max": [20.0, 10.0, 28.0]
+    },
+    "fov_deg": {
+      "min": 30.0,
+      "max": 40.0
+    }
+  },
+  "lighting": {
+    "sun_azimuth_deg": {
+      "min": 220.0,
+      "max": 320.0
+    },
+    "sun_elevation_deg": {
+      "min": 8.0,
+      "max": 28.0
+    }
+  },
+  "terrain": {
+    "amp": 1.8,
+    "scale": 0.14,
+    "nx": 64,
+    "nz": 64,
+    "bounds": {
+      "xmin": -22.0,
+      "xmax": 22.0,
+      "zmin": -22.0,
+      "zmax": 22.0
+    }
+  },
+  "asset": {
+    "obj": "test_cube.obj",
+    "scale": 1.5,
+    "color": "white",
+    "label": "test_cube",
+    "class_id": 2,
+    "y_offset": 0.75,
+    "roughness": {
+      "min": 0.05,
+      "max": 0.9
+    },
+    "metallic": {
+      "min": 0.0,
+      "max": 1.0
+    }
+  },
+  "placement": {
+    "x": {
+      "min": -12.0,
+      "max": 12.0
+    },
+    "z": {
+      "min": -12.0,
+      "max": 12.0
+    },
+    "yaw_deg": {
+      "min": 0.0,
+      "max": 360.0
+    }
+  },
+  "dataset": {
+    "root": "dataset",
+    "train_split": 0.8
+  }
+}

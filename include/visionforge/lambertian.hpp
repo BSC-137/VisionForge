@@ -5,7 +5,7 @@
 class Lambertian : public Material {
 public:
     Vec3 albedo;
-    explicit Lambertian(const Vec3& a) : albedo(a) {}
+    explicit Lambertian(const Vec3& a) : Material(a, 1.0, 0.0), albedo(a) {}
 
     bool scatter(const Ray&, const HitRecord& rec,
                  Vec3& attenuation, Ray& scattered) const override {

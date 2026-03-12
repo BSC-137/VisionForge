@@ -1,5 +1,0 @@
-instance_id,class_id,label,xmin,ymin,xmax,ymax,width,height
-4,1,white,310,463,484,599,800,600
-3,1,blue,0,321,4,350,800,600
-2,1,green,785,290,799,351,800,600
-5,2,blue,294,171,504,361,800,600

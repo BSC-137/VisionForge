@@ -16,13 +16,25 @@ public:
 
     BVHNode(std::vector<std::shared_ptr<Hittable>>& src, size_t start, size_t end) {
         size_t span = end - start;
-        int axis = int(3.0 * random_double()); // 0,1,2
+
+        AABB extent;
+        {
+            AABB tmp;
+            src[start]->bounding_box(tmp);
+            extent = tmp;
+            for (size_t i = start + 1; i < end; ++i) {
+                src[i]->bounding_box(tmp);
+                extent = surrounding_box(extent, tmp);
+            }
+        }
+        Vec3 d = extent.max() - extent.min();
+        int axis = (d.x >= d.y && d.x >= d.z) ? 0 : (d.y >= d.z ? 1 : 2);
 
         auto box_less = [axis](const std::shared_ptr<Hittable>& a,
                                const std::shared_ptr<Hittable>& b) {
             AABB ba, bb;
-            if (!a->bounding_box(ba) || !b->bounding_box(bb))
-                std::cerr << "BVH: missing bounding_box()\n";
+            a->bounding_box(ba);
+            b->bounding_box(bb);
             if (axis == 0) return ba.min().x < bb.min().x;
             if (axis == 1) return ba.min().y < bb.min().y;
             return ba.min().z < bb.min().z;

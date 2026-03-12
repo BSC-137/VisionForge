@@ -6,7 +6,7 @@
 class Dielectric : public Material {
 public:
     double ir; // index of refraction (e.g., 1.5 for glass)
-    explicit Dielectric(double index_of_refraction) : ir(index_of_refraction) {}
+    explicit Dielectric(double index_of_refraction) : Material(Vec3(1.0, 1.0, 1.0), 0.0, 0.0), ir(index_of_refraction) {}
 
     static double reflectance(double cos, double ref_idx) {
         // Schlick approximation (average reflectance)

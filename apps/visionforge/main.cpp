@@ -43,7 +43,14 @@
 #include "visionforge/exr_writer.hpp"
 #include "visionforge/png_writer.hpp"
 #include "visionforge/world_config.hpp"
+#include "visionforge/pbr_material.hpp"
 #include <nlohmann/json.hpp>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <functional>
+#include <atomic>
 
 
 #ifndef PI
@@ -145,8 +152,8 @@ struct Opts {
     std::string name = "run1";
 
     // Image & sampling
-    int width = 1280, height = 720;
-    int spp = 96, max_depth = 16;
+    int width = 320, height = 180;
+    int spp = 1, max_depth = 6;
     bool preview = false;
     unsigned seed = 1337;
 
@@ -408,10 +415,77 @@ static vf::perlin g_bump(424242);
 static Sky g_sky(/*az*/300.0, /*el*/12.0, /*turb*/3.5);
 static std::shared_ptr<Lambertian> sand_ptr;
 
-// Material helper
-static inline bool get_lambert_albedo(const std::shared_ptr<Material>& m, Vec3& out_albedo) {
-    if (auto* lam = dynamic_cast<Lambertian*>(m.get())) { out_albedo = lam->albedo; return true; }
-    return false;
+static inline double pbr_saturate(double x) { return std::clamp(x, 0.0, 1.0); }
+
+static inline Vec3 fresnel_schlick(double cos_theta, const Vec3& F0) {
+    const double x = pbr_saturate(1.0 - cos_theta);
+    const double x2 = x * x;
+    const double x4 = x2 * x2;
+    const double t = x4 * x;
+    return F0 + (Vec3(1.0, 1.0, 1.0) - F0) * t;
+}
+
+static inline double ggx_distribution(double NdotH, double roughness) {
+    const double a = std::max(0.02, roughness * roughness);
+    const double a2 = a * a;
+    const double d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
+    return a2 / std::max(PI * d * d, 1e-8);
+}
+
+static inline double schlick_beckmann_g1(double NdotX, double roughness) {
+    const double r = roughness + 1.0;
+    const double k = (r * r) / 8.0;
+    return NdotX / std::max(NdotX * (1.0 - k) + k, 1e-6);
+}
+
+static inline double schlick_beckmann_geometry(double NdotV, double NdotL, double roughness) {
+    return schlick_beckmann_g1(NdotV, roughness) * schlick_beckmann_g1(NdotL, roughness);
+}
+
+static inline Vec3 cook_torrance_brdf(const Material& m, const Vec3& N, const Vec3& V, const Vec3& L) {
+    const Vec3 VH = V + L;
+    if (VH.length_squared() < 1e-12) return Vec3(0, 0, 0);
+    const Vec3 H = normalize(VH);
+    const double NdotL = pbr_saturate(dot(N, L));
+    const double NdotV = pbr_saturate(dot(N, V));
+    const double NdotH = pbr_saturate(dot(N, H));
+    const double VdotH = pbr_saturate(dot(V, H));
+
+    const double roughness = std::clamp(m.roughness, 0.0, 1.0);
+    const double metallic = std::clamp(m.metallic, 0.0, 1.0);
+    const Vec3 base = m.base_color;
+
+    const Vec3 dielectric_F0(0.04, 0.04, 0.04);
+    const Vec3 F0 = dielectric_F0 * (1.0 - metallic) + base * metallic;
+    const Vec3 F = fresnel_schlick(VdotH, F0);
+    const double D = ggx_distribution(NdotH, roughness);
+    const double G = schlick_beckmann_geometry(NdotV, NdotL, roughness);
+
+    const Vec3 numerator = (D * G) * F;
+    const double denom = std::max(4.0 * NdotV * NdotL, 1e-6);
+    const Vec3 specular = numerator / denom;
+
+    const Vec3 kS = F;
+    const Vec3 kD = (Vec3(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
+    const Vec3 diffuse = (kD * base) / PI;
+    return diffuse + specular;
+}
+
+static inline double pbr_brdf_pdf(const Material& m, const Vec3& N, const Vec3& V, const Vec3& L) {
+    const Vec3 VH = V + L;
+    if (VH.length_squared() < 1e-12) return 0.0;
+    const Vec3 H = normalize(VH);
+    const double NdotL = pbr_saturate(dot(N, L));
+    const double NdotH = pbr_saturate(dot(N, H));
+    const double VdotH = pbr_saturate(dot(V, H));
+    if (NdotL <= 0.0 || NdotH <= 0.0 || VdotH <= 0.0) return 0.0;
+
+    const double roughness = std::clamp(m.roughness, 0.0, 1.0);
+    const double D = ggx_distribution(NdotH, roughness);
+    const double pdf_spec = std::max((D * NdotH) / std::max(4.0 * VdotH, 1e-6), 0.0);
+    const double pdf_diff = NdotL / PI;
+    const double spec_prob = std::clamp(0.25 + 0.75 * std::clamp(m.metallic, 0.0, 1.0), 0.1, 0.95);
+    return (1.0 - spec_prob) * pdf_diff + spec_prob * pdf_spec;
 }
 static void apply_sand_bump(HitRecord& rec);
 
@@ -420,7 +494,7 @@ template<typename RectT>
 Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int depth, int max_depth,
                bool PREVIEW, int LIGHT_SAMPLES_PREVIEW, int LIGHT_SAMPLES_FINAL,
                int MAX_DEPTH_PREVIEW, int MAX_DEPTH_FINAL, double SKY_VIEW_GAIN,
-               bool show_light_on_primary,
+               bool show_light_on_primary, bool primary_hit_lighting_only,
                GBuffer* gbuf, int pix_index)
 {
     if (depth <= 0) return Vec3(0,0,0);
@@ -450,9 +524,8 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
         gbuf->normal_z[pix_index] = float(rec.normal.z);
     }
 
-    // optionally hide emissive rect from primary (so we see sky)
     if (!show_light_on_primary && depth == max_depth) {
-        if (dynamic_cast<DiffuseLight*>(rec.mat.get()) != nullptr) {
+        if (rec.mat->is_emissive()) {
             if (gbuf) {
                 gbuf->inst_id[pix_index]  = 0;
                 gbuf->depth[pix_index]    = 1e30f;
@@ -468,30 +541,14 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
 
     Vec3 emitted = rec.mat->emitted(rec);
 
-    Ray scattered; Vec3 attenuation;
-    if (!rec.mat->scatter(r, rec, attenuation, scattered)) return emitted;
-
-    if (attenuation.x < 1e-3 && attenuation.y < 1e-3 && attenuation.z < 1e-3) return emitted;
-
-    // RR
-    if (depth < max_depth - 4) {
-        double p = std::max({attenuation.x, attenuation.y, attenuation.z});
-        p = std::max(0.05, std::min(1.0, p));
-        if (random_double() > p) return emitted;
-        attenuation /= p;
-    }
-
-    Vec3 indirect = attenuation * ray_color(scattered, world, area_light, depth - 1, max_depth,
-                                            PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
-                                            MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
-                                            show_light_on_primary, gbuf, pix_index);
-
     Vec3 direct(0,0,0);
-    Vec3 albedo;
     const int LIGHT_SAMPLES_PER_HIT = PREVIEW ? LIGHT_SAMPLES_PREVIEW : LIGHT_SAMPLES_FINAL;
 
-    if (area_light && get_lambert_albedo(rec.mat, albedo)) {
+    if (area_light) {
         Vec3 L_light(0,0,0);
+        const Vec3 V = normalize(-r.direction);
+        const double A = area_light->area();
+        const Vec3 Le = area_light->mat->emitted(rec);
         for (int s=0; s<LIGHT_SAMPLES_PER_HIT; ++s) {
             Vec3 lp = area_light->sample_point();
             Vec3 toL = lp - rec.point;
@@ -507,20 +564,38 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
             HitRecord shadow_hit;
             if (world.hit(shadow_ray, 0.001, dist - 0.001, shadow_hit)) continue;
 
-            double A = area_light->area();
             double pdf_light = dist2 / (cos_l * A);
-            double pdf_brdf  = cos_i / PI;
+            Vec3 f = cook_torrance_brdf(*rec.mat, rec.normal, V, wi);
+            double pdf_brdf = pbr_brdf_pdf(*rec.mat, rec.normal, V, wi);
             double w = pdf_light / (pdf_light + pdf_brdf);
 
-            Vec3 Le = area_light->mat->emitted(rec);
-            Vec3 f  = (albedo / PI);
             L_light += w * Le * f * (cos_i / pdf_light);
         }
         L_light /= double(LIGHT_SAMPLES_PER_HIT);
         direct = L_light;
     }
 
-    // Apply sand micro-bumps here (we delayed to know globals outside)
+    if (primary_hit_lighting_only && depth == max_depth) {
+        return emitted + direct;
+    }
+
+    Ray scattered; Vec3 attenuation;
+    if (!rec.mat->scatter(r, rec, attenuation, scattered)) return emitted + direct;
+
+    if (attenuation.x < 1e-3 && attenuation.y < 1e-3 && attenuation.z < 1e-3) return emitted + direct;
+
+    // RR
+    if (depth < max_depth - 4) {
+        double p = std::max({attenuation.x, attenuation.y, attenuation.z});
+        p = std::max(0.05, std::min(1.0, p));
+        if (random_double() > p) return emitted + direct;
+        attenuation /= p;
+    }
+
+    Vec3 indirect = attenuation * ray_color(scattered, world, area_light, depth - 1, max_depth,
+                                            PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                            MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
+                                            show_light_on_primary, primary_hit_lighting_only, gbuf, pix_index);
     return emitted + direct + indirect;
 }
 
@@ -618,10 +693,11 @@ static inline Vec3 sample_range(std::mt19937& rng, const Vec3Range& r) {
 
 static int render_frame(const Opts& o,
                         const Camera& cam,
-                        const BVHNode& world,
+                        const Hittable& world,
                         const std::shared_ptr<YZRect>& rect_light,
                         std::vector<unsigned char>& fb,
-                        GBuffer& gbuf) {
+                        GBuffer& gbuf,
+                        bool primary_hit_lighting_only) {
     bool PREVIEW = o.preview;
     int width = o.width;
     int height = o.height;
@@ -640,53 +716,272 @@ static int render_frame(const Opts& o,
     fb.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 3, 0);
     long long spp_accum = 0;
 
-    #if defined(VF_USE_OMP)
-      #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
-    #endif
-    for (int j = height - 1; j >= 0; --j) {
-        for (int i = 0; i < width; ++i) {
-            Vec3 sum(0,0,0);
-            double meanL = 0.0, M2 = 0.0;
-            int s = 0;
-            int pix_index = ((height-1-j)*width + i);
-            for (; s < spp_target; ++s) {
-                double u = (i + random_double()) / (width  - 1);
-                double v = (j + random_double()) / (height - 1);
-                Ray r = cam.get_ray(u, v);
-                Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
-                                   PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
-                                   6, o.max_depth, o.sky_gain,
-                                   o.show_light_on_primary, &gbuf, pix_index);
-                sum += c;
-
-                double L = luminance(c);
-                double delta = L - meanL;
-                meanL += delta / double(s + 1);
-                M2 += delta * (L - meanL);
-                if (s + 1 >= MIN_SPP) {
-                    double var = (s > 0) ? (M2 / s) : 0.0;
-                    double sigma = std::sqrt(std::max(0.0, var));
-                    double ci95 = 1.96 * sigma / std::sqrt(double(s + 1));
-                    if (ci95 < REL_NOISE_TARGET * std::max(1e-3, meanL)) break;
+    if (primary_hit_lighting_only) {
+        #if defined(VF_USE_OMP)
+          #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
+        #endif
+        for (int j = height - 1; j >= 0; --j) {
+            vf_rng::seed_thread_rng(uint64_t(j) * 0x9e3779b97f4a7c15ULL + 42);
+            for (int i = 0; i < width; ++i) {
+                Vec3 sum(0,0,0);
+                int pix_index = ((height-1-j)*width + i);
+                for (int s = 0; s < spp_target; ++s) {
+                    double u = (i + random_double()) / (width  - 1);
+                    double v = (j + random_double()) / (height - 1);
+                    Ray r = cam.get_ray(u, v);
+                    sum += ray_color(r, world, rect_light.get(), max_depth, max_depth,
+                                     PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                     6, o.max_depth, o.sky_gain,
+                                     o.show_light_on_primary, true, &gbuf, pix_index);
                 }
-            }
-            spp_accum += (s + 1);
+                spp_accum += spp_target;
 
-            Vec3 pixel = (sum / double(s + 1)) * exposure;
-            Vec3 mapped = aces_tonemap(pixel);
-            mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
-            int idx = pix_index * 3;
-            fb[idx + 0] = (unsigned char)(256 * clamp01(mapped.x));
-            fb[idx + 1] = (unsigned char)(256 * clamp01(mapped.y));
-            fb[idx + 2] = (unsigned char)(256 * clamp01(mapped.z));
+                Vec3 pixel = (sum / double(spp_target)) * exposure;
+                Vec3 mapped = aces_tonemap(pixel);
+                mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
+                int idx = pix_index * 3;
+                fb[idx + 0] = (unsigned char)(256 * clamp01(mapped.x));
+                fb[idx + 1] = (unsigned char)(256 * clamp01(mapped.y));
+                fb[idx + 2] = (unsigned char)(256 * clamp01(mapped.z));
+            }
+        }
+    } else {
+        #if defined(VF_USE_OMP)
+          #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
+        #endif
+        for (int j = height - 1; j >= 0; --j) {
+            vf_rng::seed_thread_rng(uint64_t(j) * 0x9e3779b97f4a7c15ULL + 42);
+            for (int i = 0; i < width; ++i) {
+                Vec3 sum(0,0,0);
+                double meanL = 0.0, M2 = 0.0;
+                int s = 0;
+                int pix_index = ((height-1-j)*width + i);
+                for (; s < spp_target; ++s) {
+                    double u = (i + random_double()) / (width  - 1);
+                    double v = (j + random_double()) / (height - 1);
+                    Ray r = cam.get_ray(u, v);
+                    Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
+                                       PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                       6, o.max_depth, o.sky_gain,
+                                       o.show_light_on_primary, false, &gbuf, pix_index);
+                    sum += c;
+
+                    double L = luminance(c);
+                    double delta = L - meanL;
+                    meanL += delta / double(s + 1);
+                    M2 += delta * (L - meanL);
+                    if (s + 1 >= MIN_SPP) {
+                        double var = (s > 0) ? (M2 / s) : 0.0;
+                        double sigma = std::sqrt(std::max(0.0, var));
+                        double ci95 = 1.96 * sigma / std::sqrt(double(s + 1));
+                        if (ci95 < REL_NOISE_TARGET * std::max(1e-3, meanL)) break;
+                    }
+                }
+                spp_accum += (s + 1);
+
+                Vec3 pixel = (sum / double(s + 1)) * exposure;
+                Vec3 mapped = aces_tonemap(pixel);
+                mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
+                int idx = pix_index * 3;
+                fb[idx + 0] = (unsigned char)(256 * clamp01(mapped.x));
+                fb[idx + 1] = (unsigned char)(256 * clamp01(mapped.y));
+                fb[idx + 2] = (unsigned char)(256 * clamp01(mapped.z));
+            }
         }
     }
 
     return int(double(spp_accum) / double(width * height) + 0.5);
 }
 
+// ---- Async I/O pipeline for forge ----
+
+struct ForgeFrameData {
+    int frame_id;
+    int width, height;
+    int avg_spp;
+    bool is_train;
+    std::string split_dir;
+    std::string stem;
+
+    std::vector<unsigned char> fb;
+    GBuffer gbuf;
+
+    Vec3 lookfrom;
+    Vec3 lookat, up;
+    double fov;
+    double sun_az, sun_el;
+    double obj_x, obj_y, obj_z, obj_yaw;
+    double obj_roughness, obj_metallic;
+    uint32_t class_id;
+    std::string label;
+    int spp_target, max_depth;
+    unsigned seed;
+};
+
+static void write_meta_fast(const std::string& path, const ForgeFrameData& f) {
+    char buf[4096];
+    const double yaw_rad = f.obj_yaw * PI / 180.0;
+    const double c = std::cos(yaw_rad), s = std::sin(yaw_rad);
+    int n = std::snprintf(buf, sizeof(buf),
+R"({"frame_id":%d,"split":"%s","image_width":%d,"image_height":%d,)"
+R"("render":{"spp_target":%d,"spp_avg":%d,"max_depth":%d,"seed":%u},)"
+R"("camera":{"lookfrom":[%.8g,%.8g,%.8g],"lookat":[%.8g,%.8g,%.8g],)"
+R"("up":[%.8g,%.8g,%.8g],"fov_deg":%.8g},)"
+R"("sun":{"azimuth_deg":%.8g,"elevation_deg":%.8g},)"
+R"("objects":[{"instance_id":1,"class_id":%u,"label":"%s",)"
+R"("position":[%.8g,%.8g,%.8g],"rotation_y_deg":%.8g,)"
+R"("roughness":%.8g,"metallic":%.8g,)"
+R"("local_to_world":[[%.8g,0,%.8g,%.8g],[0,1,0,%.8g],[%.8g,0,%.8g,%.8g],[0,0,0,1]]}]})"
+"\n",
+        f.frame_id, f.is_train ? "train" : "val", f.width, f.height,
+        f.spp_target, f.avg_spp, f.max_depth, f.seed,
+        f.lookfrom.x, f.lookfrom.y, f.lookfrom.z,
+        f.lookat.x, f.lookat.y, f.lookat.z,
+        f.up.x, f.up.y, f.up.z, f.fov,
+        f.sun_az, f.sun_el,
+        f.class_id, f.label.c_str(),
+        f.obj_x, f.obj_y, f.obj_z, f.obj_yaw,
+        f.obj_roughness, f.obj_metallic,
+        c, s, f.obj_x, f.obj_y, -s, c, f.obj_z);
+
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if (fp) { std::fwrite(buf, 1, std::min(n, (int)sizeof(buf) - 1), fp); std::fclose(fp); }
+}
+
+static void write_yolo_fast(const std::string& path, int W, int H,
+                            const std::vector<DetectedBox>& boxes) {
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if (!fp) return;
+    char line[128];
+    for (auto& b : boxes) {
+        double cx = (b.x0 + b.x1 + 1) * 0.5 / W;
+        double cy = (b.y0 + b.y1 + 1) * 0.5 / H;
+        double w  = double(b.x1 - b.x0 + 1) / W;
+        double h  = double(b.y1 - b.y0 + 1) / H;
+        int n = std::snprintf(line, sizeof(line), "%u %.6f %.6f %.6f %.6f\n",
+                              b.class_id, cx, cy, w, h);
+        std::fwrite(line, 1, n, fp);
+    }
+    std::fclose(fp);
+}
+
+class ForgeIOWorker {
+public:
+    ForgeIOWorker() : done_(false), error_(false) {
+        thread_ = std::thread([this]{ run(); });
+    }
+    ~ForgeIOWorker() { drain(); }
+
+    void push(ForgeFrameData&& fd) {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            queue_.push(std::move(fd));
+        }
+        cv_.notify_one();
+    }
+
+    void drain() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            done_ = true;
+        }
+        cv_.notify_one();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    bool had_error() const { return error_.load(); }
+
+    CocoWriter& coco() { return coco_; }
+
+private:
+    std::thread thread_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::queue<ForgeFrameData> queue_;
+    bool done_;
+    std::atomic<bool> error_;
+    CocoWriter coco_;
+
+    void run() {
+        while (true) {
+            ForgeFrameData fd;
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [&]{ return !queue_.empty() || done_; });
+                if (queue_.empty() && done_) break;
+                fd = std::move(queue_.front());
+                queue_.pop();
+            }
+            process(fd);
+        }
+    }
+
+    void process(const ForgeFrameData& f) {
+        const std::string png_path  = f.split_dir + "/" + f.stem + ".png";
+        const std::string exr_path  = f.split_dir + "/" + f.stem + "_spatial.exr";
+        const std::string meta_path = f.split_dir + "/" + f.stem + "_meta.json";
+        const std::string yolo_path = f.split_dir + "/" + f.stem + ".txt";
+
+        if (!vf::write_png_rgb8(png_path.c_str(), f.width, f.height, f.fb.data())) {
+            std::cerr << "Forge IO: failed PNG: " << png_path << "\n";
+            error_ = true; return;
+        }
+        if (!vf::write_gbuffer_exr(exr_path.c_str(), f.gbuf)) {
+            std::cerr << "Forge IO: failed EXR: " << exr_path << "\n";
+            error_ = true; return;
+        }
+
+        write_meta_fast(meta_path, f);
+
+        IdRegistry reg;
+        reg.id_to_label[1] = f.label;
+        reg.id_to_class[1] = f.class_id;
+        auto boxes = boxes_from_mask(f.gbuf, reg);
+
+        write_yolo_fast(yolo_path, f.width, f.height, boxes);
+
+        int coco_img_id = coco_.add_image(f.stem + ".png", f.width, f.height);
+        for (auto& b : boxes) {
+            coco_.ensure_category(b.class_id, b.label);
+            coco_.add_box(coco_img_id, b.class_id, b.x0, b.y0, b.x1, b.y1,
+                          b.instance_id, b.label);
+        }
+    }
+};
+
+static void write_coco_fast(const std::string& path, const CocoWriter& coco) {
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if (!fp) return;
+    std::fprintf(fp, "{\"images\":[\n");
+    for (size_t i = 0; i < coco.images.size(); ++i) {
+        auto& im = coco.images[i];
+        std::fprintf(fp, "{\"id\":%d,\"file_name\":\"%s\",\"width\":%d,\"height\":%d}%s\n",
+                     im.id, im.file_name.c_str(), im.width, im.height,
+                     (i + 1 < coco.images.size()) ? "," : "");
+    }
+    std::fprintf(fp, "],\"annotations\":[\n");
+    for (size_t i = 0; i < coco.anns.size(); ++i) {
+        auto& a = coco.anns[i];
+        std::fprintf(fp, "{\"id\":%d,\"image_id\":%d,\"category_id\":%d,"
+                     "\"bbox\":[%.1f,%.1f,%.1f,%.1f],\"iscrowd\":0,\"area\":%d,"
+                     "\"instance_id\":%d,\"label\":\"%s\"}%s\n",
+                     a.id, a.image_id, a.category_id,
+                     a.x, a.y, a.w, a.h, a.area,
+                     a.instance_id, a.label.c_str(),
+                     (i + 1 < coco.anns.size()) ? "," : "");
+    }
+    std::fprintf(fp, "],\"categories\":[\n");
+    for (size_t i = 0; i < coco.cats.size(); ++i) {
+        auto& c = coco.cats[i];
+        std::fprintf(fp, "{\"id\":%d,\"name\":\"%s\"}%s\n",
+                     c.id, c.name.c_str(),
+                     (i + 1 < coco.cats.size()) ? "," : "");
+    }
+    std::fprintf(fp, "]}\n");
+    std::fclose(fp);
+}
+
 static int run_forge_subcommand(int argc, char** argv) {
-    using json = nlohmann::json;
     ForgeCli cli = parse_forge_cli(argc, argv);
     WorldConfig cfg = load_world_config(cli.config_path);
 
@@ -706,6 +1001,11 @@ static int run_forge_subcommand(int argc, char** argv) {
     o.preview = cfg.render.preview;
     o.seed = cfg.render.seed;
     o.write_exr = true;
+    o.max_depth = 2;
+    o.light_samples_final = 1;
+    o.min_spp = 1;
+    o.rel_noise_target = 1.0;
+    o.spp = 1;
 
     sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
     HeightField hf(cfg.terrain.xmin, cfg.terrain.xmax,
@@ -720,11 +1020,13 @@ static int run_forge_subcommand(int argc, char** argv) {
     auto rect_light = std::make_shared<YZRect>(o.light_y0, o.light_y1, o.light_z0, o.light_z1, o.light_x, sun_em);
     static_world.add(rect_light);
     hf.to_triangles(static_world, sand_ptr);
+    std::vector<std::shared_ptr<Hittable>> static_objs = static_world.objects;
+    auto static_bvh = std::make_shared<BVHNode>(static_objs, 0, static_objs.size());
 
     bool color_ok = true;
     std::string unused_label;
     Vec3 obj_col = parse_color_one(cfg.asset.color, color_ok, unused_label);
-    auto obj_mat = std::make_shared<Lambertian>(obj_col);
+    auto obj_mat = std::make_shared<PBRMaterial>(obj_col, cfg.asset.roughness.min, cfg.asset.metallic.min);
     auto base_mesh = Mesh::from_obj(cfg.asset.obj, obj_mat, Vec3(0, 0, 0), cfg.asset.scale);
     if (!base_mesh) {
         std::cerr << "Forge: failed to load OBJ asset: " << cfg.asset.obj << "\n";
@@ -734,9 +1036,23 @@ static int run_forge_subcommand(int argc, char** argv) {
     std::mt19937 dr_rng(cfg.render.seed ^ 0x9e3779b1u);
     int train_count = static_cast<int>(std::round(cli.frames * cfg.dataset.train_split));
 
-    for (int frame = 0; frame < cli.frames; ++frame) {
-        std::cout << "Generating frame " << (frame + 1) << "/" << cli.frames << "...\n";
+    const double aspect = double(o.width) / double(o.height);
+    std::vector<unsigned char> fb;
+    fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
+    GBuffer gbuf(o.width, o.height);
 
+    auto rotate_node = std::make_shared<RotateY>(base_mesh, 0.0);
+    auto translate_node = std::make_shared<Translate>(rotate_node, Vec3(0, 0, 0));
+    ObjectInfo obj_info{1u, cfg.asset.class_id, cfg.asset.label.c_str()};
+    auto tag_node = std::make_shared<Tag>(translate_node, obj_info);
+
+    HittableList frame_world;
+    frame_world.objects.reserve(2);
+
+    ForgeIOWorker io_worker;
+    double total_render_ms = 0.0;
+
+    for (int frame = 0; frame < cli.frames; ++frame) {
         Vec3 lookfrom = sample_range(dr_rng, cfg.camera.lookfrom);
         double fov = sample_range(dr_rng, cfg.camera.fov_deg);
         double sun_az = sample_range(dr_rng, cfg.lighting.sun_azimuth_deg);
@@ -745,89 +1061,85 @@ static int run_forge_subcommand(int argc, char** argv) {
         double obj_z = sample_range(dr_rng, cfg.placement.z);
         double obj_yaw = sample_range(dr_rng, cfg.placement.yaw_deg);
         double obj_y = hf.height_at(obj_x, obj_z) + cfg.asset.y_offset;
+        double obj_roughness = sample_range(dr_rng, cfg.asset.roughness);
+        double obj_metallic = sample_range(dr_rng, cfg.asset.metallic);
+        obj_mat->set_parameters(obj_col, obj_roughness, obj_metallic);
 
         g_sky.set_angles(sun_az, sun_el);
         g_sky.set_turbidity(o.turbidity);
 
-        HittableList frame_world;
-        frame_world.objects = static_world.objects;
+        *rotate_node = RotateY(base_mesh, obj_yaw);
+        translate_node->offset = Vec3(obj_x, obj_y, obj_z);
 
-        std::shared_ptr<Hittable> posed = std::make_shared<RotateY>(base_mesh, obj_yaw);
-        posed = std::make_shared<Translate>(posed, Vec3(obj_x, obj_y, obj_z));
-        ObjectInfo obj_info{1u, cfg.asset.class_id, cfg.asset.label.c_str()};
-        frame_world.add(std::make_shared<Tag>(posed, obj_info));
+        frame_world.objects.clear();
+        frame_world.objects.push_back(static_bvh);
+        frame_world.objects.push_back(tag_node);
 
-        std::vector<std::shared_ptr<Hittable>> objs_vec = frame_world.objects;
-        BVHNode world(objs_vec, 0, objs_vec.size());
-
-        const double aspect = double(o.width) / double(o.height);
         const double focus_dist = (lookfrom - cfg.camera.lookat).length();
         Camera cam(lookfrom, cfg.camera.lookat, cfg.camera.up, fov, aspect, 0.0, focus_dist, 0.0, 1.0);
 
-        std::srand(o.seed + static_cast<unsigned>(frame));
-        std::vector<unsigned char> fb;
-        GBuffer gbuf(o.width, o.height);
-        int avg_spp = render_frame(o, cam, world, rect_light, fb, gbuf);
+        vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(frame));
+        gbuf.clear();
+        auto t_render_start = std::chrono::high_resolution_clock::now();
+        int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, /*primary_hit_lighting_only=*/true);
+        auto t_render_end = std::chrono::high_resolution_clock::now();
+        double render_ms = std::chrono::duration<double, std::milli>(t_render_end - t_render_start).count();
+        total_render_ms += render_ms;
 
-        const std::string split_dir = (frame < train_count) ? train_dir : val_dir;
-        std::ostringstream base_name;
-        base_name << "frame_" << std::setw(4) << std::setfill('0') << frame;
-        const std::string stem = base_name.str();
+        const bool is_train = (frame < train_count);
+        const std::string& split_dir = is_train ? train_dir : val_dir;
+        char stem_buf[32];
+        std::snprintf(stem_buf, sizeof(stem_buf), "frame_%04d", frame);
 
-        const std::string png_path = split_dir + "/" + stem + ".png";
-        const std::string exr_path = split_dir + "/" + stem + "_spatial.exr";
-        const std::string meta_path = split_dir + "/" + stem + "_meta.json";
+        ForgeFrameData fd;
+        fd.frame_id = frame;
+        fd.width = o.width;
+        fd.height = o.height;
+        fd.avg_spp = avg_spp;
+        fd.is_train = is_train;
+        fd.split_dir = split_dir;
+        fd.stem = stem_buf;
+        fd.fb = std::move(fb);
+        fd.gbuf = std::move(gbuf);
+        fd.lookfrom = lookfrom;
+        fd.lookat = cfg.camera.lookat;
+        fd.up = cfg.camera.up;
+        fd.fov = fov;
+        fd.sun_az = sun_az;
+        fd.sun_el = sun_el;
+        fd.obj_x = obj_x;
+        fd.obj_y = obj_y;
+        fd.obj_z = obj_z;
+        fd.obj_yaw = obj_yaw;
+        fd.obj_roughness = obj_roughness;
+        fd.obj_metallic = obj_metallic;
+        fd.class_id = cfg.asset.class_id;
+        fd.label = cfg.asset.label;
+        fd.spp_target = o.spp;
+        fd.max_depth = o.max_depth;
+        fd.seed = o.seed + static_cast<unsigned>(frame);
 
-        if (!vf::write_png_rgb8(png_path.c_str(), o.width, o.height, fb.data())) {
-            std::cerr << "Forge: failed to write PNG: " << png_path << "\n";
-            return 2;
-        }
-        if (!vf::write_gbuffer_exr(exr_path.c_str(), gbuf)) {
-            std::cerr << "Forge: failed to write EXR: " << exr_path << "\n";
-            return 2;
-        }
+        io_worker.push(std::move(fd));
 
-        const double yaw_rad = obj_yaw * PI / 180.0;
-        const double c = std::cos(yaw_rad);
-        const double s = std::sin(yaw_rad);
-        json meta;
-        meta["frame_id"] = frame;
-        meta["split"] = (frame < train_count) ? "train" : "val";
-        meta["image_width"] = o.width;
-        meta["image_height"] = o.height;
-        meta["render"] = {
-            {"spp_target", o.spp},
-            {"spp_avg", avg_spp},
-            {"max_depth", o.max_depth},
-            {"seed", o.seed + static_cast<unsigned>(frame)}
-        };
-        meta["camera"] = {
-            {"lookfrom", {lookfrom.x, lookfrom.y, lookfrom.z}},
-            {"lookat", {cfg.camera.lookat.x, cfg.camera.lookat.y, cfg.camera.lookat.z}},
-            {"up", {cfg.camera.up.x, cfg.camera.up.y, cfg.camera.up.z}},
-            {"fov_deg", fov}
-        };
-        meta["sun"] = {
-            {"azimuth_deg", sun_az},
-            {"elevation_deg", sun_el}
-        };
-        meta["objects"] = json::array();
-        meta["objects"].push_back({
-            {"instance_id", 1},
-            {"class_id", cfg.asset.class_id},
-            {"label", cfg.asset.label},
-            {"position", {obj_x, obj_y, obj_z}},
-            {"rotation_y_deg", obj_yaw},
-            {"local_to_world", {
-                {c, 0.0, s, obj_x},
-                {0.0, 1.0, 0.0, obj_y},
-                {-s, 0.0, c, obj_z},
-                {0.0, 0.0, 0.0, 1.0}
-            }}
-        });
+        fb.clear();
+        fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
+        gbuf = GBuffer(o.width, o.height);
 
-        std::ofstream meta_out(meta_path);
-        meta_out << std::setw(2) << meta << "\n";
+        std::cout << "Frame " << (frame + 1) << "/" << cli.frames
+                  << "  render=" << int(render_ms) << "ms\n";
+    }
+
+    std::cout << "Rendering done. Avg render: "
+              << int(total_render_ms / cli.frames) << "ms/frame. Flushing I/O...\n";
+    io_worker.drain();
+
+    const std::string coco_train = train_dir + "/annotations_coco.json";
+    const std::string coco_val   = val_dir   + "/annotations_coco.json";
+    write_coco_fast(cfg.dataset.root + "/annotations_coco.json", io_worker.coco());
+
+    if (io_worker.had_error()) {
+        std::cerr << "Forge: I/O errors occurred.\n";
+        return 2;
     }
 
     std::cout << "Forge complete. Dataset written to " << cfg.dataset.root << "\n";
@@ -841,7 +1153,7 @@ int main(int argc, char** argv) {
     }
 
     Opts o = parse(argc, argv);
-    std::srand(o.seed);
+    vf_rng::seed_thread_rng(o.seed);
 
     // render controls
     bool   PREVIEW = o.preview;
@@ -941,9 +1253,9 @@ int main(int argc, char** argv) {
 
 
     // Build lambertian materials for each unique color token
-    std::vector<std::shared_ptr<Lambertian>> cube_mats;
+    std::vector<std::shared_ptr<Material>> cube_mats;
     cube_mats.reserve(cube_colors.size());
-    for (auto& c : cube_colors) cube_mats.push_back(std::make_shared<Lambertian>(c));
+    for (auto& c : cube_colors) cube_mats.push_back(std::make_shared<PBRMaterial>(c, 0.65, 0.0));
 
     // cube placement
     struct CubePose { Vec3 c; double edge; double roll; double pitch; int color_idx; std::string label; };
@@ -1030,7 +1342,7 @@ int main(int argc, char** argv) {
         bool color_ok = true;
         std::string obj_label;
         Vec3 obj_col = parse_color_one(o.obj_color, color_ok, obj_label);
-        auto obj_mat = std::make_shared<Lambertian>(obj_col);
+        auto obj_mat = std::make_shared<PBRMaterial>(obj_col, 0.5, 0.0);
 
         auto mesh = Mesh::from_obj(o.obj_path, obj_mat, o.obj_pos, o.obj_scale);
         if (mesh) {
@@ -1075,7 +1387,7 @@ int main(int argc, char** argv) {
                 HitRecord rec;
                 if (world.hit(r, 0.001, std::numeric_limits<double>::infinity(), rec)) {
                     bool is_hidden_light = !o.show_light_on_primary
-                                           && dynamic_cast<DiffuseLight*>(rec.mat.get());
+                                           && rec.mat->is_emissive();
                     if (is_hidden_light) {
                         gbuf.depth[pix_index]    = 1e30f;
                         gbuf.normal_x[pix_index] = 0.0f;
@@ -1098,11 +1410,11 @@ int main(int argc, char** argv) {
         }
         spp_accum = (long long)width * height;
     } else {
-        // Full path-tracing pass
         #if defined(VF_USE_OMP)
           #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
         #endif
         for (int j = height - 1; j >= 0; --j) {
+            vf_rng::seed_thread_rng(uint64_t(j) * 0x9e3779b97f4a7c15ULL + o.seed);
             for (int i = 0; i < width; ++i) {
                 Vec3 sum(0,0,0);
                 double meanL = 0.0, M2 = 0.0;
@@ -1115,7 +1427,7 @@ int main(int argc, char** argv) {
                     Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
                                        PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
                                        MAX_DEPTH_PREVIEW, MAX_DEPTH_FINAL, SKY_VIEW_GAIN,
-                                       o.show_light_on_primary, &gbuf, pix_index);
+                                       o.show_light_on_primary, /*primary_hit_lighting_only=*/false, &gbuf, pix_index);
                     sum += c;
 
                     // adaptive stop
@@ -1141,94 +1453,136 @@ int main(int argc, char** argv) {
         }
     }
 
-    // EXR G-Buffer export (always written when --exr or --depth-only)
-    if (o.write_exr) {
-        std::string exr_path = o.out + "/gbuffer.exr";
-        if (vf::write_gbuffer_exr(exr_path.c_str(), gbuf))
-            std::cout << "Wrote " << exr_path << "\n";
-        else
-            std::cerr << "Error writing " << exr_path << "\n";
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double render_secs = std::chrono::duration<double>(t1 - t0).count();
+    int avg_spp = int(double(spp_accum) / double(width*height) + 0.5);
+
+    bool single_file = (o.out.size() >= 4 &&
+                        (o.out.substr(o.out.size()-4) == ".ppm" ||
+                         o.out.substr(o.out.size()-4) == ".png"));
+
+    if (single_file) {
+        bool is_png = o.out.substr(o.out.size()-4) == ".png";
+        if (is_png) {
+            if (o.write_bbox_overlay && !o.depth_only) {
+                for (auto& pose : cubes) {
+                    Box2D b = cube_bbox_screen_rot(camBasis, {pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
+                    if (b.valid) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
+                }
+            }
+            vf::write_png_rgb8(o.out.c_str(), width, height, fb.data());
+        } else {
+            if (o.write_bbox_overlay && !o.depth_only) {
+                for (auto& pose : cubes) {
+                    Box2D b = cube_bbox_screen_rot(camBasis, {pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
+                    if (b.valid) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
+                }
+            }
+            FILE* fp = std::fopen(o.out.c_str(), "wb");
+            if (fp) {
+                std::fprintf(fp, "P6\n%d %d\n255\n", width, height);
+                std::fwrite(fb.data(), 1, fb.size(), fp);
+                std::fclose(fp);
+            }
+        }
+        std::cout << "Wrote " << o.out << "  render=" << render_secs << "s  avg_spp=" << avg_spp << "\n";
+        return 0;
+    }
+
+    // ---- Directory output mode: full forge-style labels ----
+    std::filesystem::create_directories(o.out);
+
+    if (!o.depth_only) {
+        if (o.write_bbox_overlay) {
+            for (auto& pose : cubes) {
+                Box2D b = cube_bbox_screen_rot(camBasis, {pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
+                if (b.valid) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
+            }
+        }
+    }
+
+    std::cout << "Render done: " << render_secs << "s  avg_spp=" << avg_spp << ". Writing outputs...\n";
+
+    auto t_io_start = std::chrono::high_resolution_clock::now();
+
+    FILE* ppm_fp = std::fopen((o.out + "/image.ppm").c_str(), "wb");
+    if (ppm_fp) {
+        std::fprintf(ppm_fp, "P6\n%d %d\n255\n", width, height);
+        std::fwrite(fb.data(), 1, fb.size(), ppm_fp);
+        std::fclose(ppm_fp);
+    }
+
+    vf::write_png_rgb8((o.out + "/image.png").c_str(), width, height, fb.data());
+
+    if (o.write_exr || o.depth_only) {
+        vf::write_gbuffer_exr((o.out + "/gbuffer.exr").c_str(), gbuf);
     }
 
     if (!o.depth_only) {
-        // 2D bbox overlay from analytic cube OBBs
-        std::vector<Box2D> boxes; boxes.reserve(cubes.size());
-        for (auto& pose : cubes){
-            Box2D b = cube_bbox_screen_rot(camBasis, /*pose*/{pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
-            if (b.valid) boxes.push_back(b);
-        }
-        if (o.write_bbox_overlay){
-            for (auto& b : boxes) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
-        }
-
-        // write outputs
-        const std::string ppm  = o.out + "/image.ppm";
-        const std::string csv  = o.out + "/bboxes.csv";
-        const std::string json = o.out + "/bboxes.json";
-
-        std::ofstream file(ppm, std::ios::binary);
-        file << "P6\n" << width << " " << height << "\n255\n";
-        file.write(reinterpret_cast<const char*>(fb.data()), fb.size());
-        std::cout << "Wrote " << ppm << "\n";
-
-        {
-            std::ofstream c(csv);
-            c << "label,xmin,ymin,xmax,ymax,width,height\n";
-            for (auto& b : boxes){
-                c << b.label << "," << b.x0 << "," << b.y0 << "," << b.x1 << "," << b.y1
-                  << "," << width << "," << height << "\n";
-            }
-            std::cout << "Wrote " << csv << "\n";
-        }
-        {
-            std::ofstream j(json);
-            j << std::fixed << std::setprecision(0);
-            j << "{\n  \"image_width\": " << width << ",\n  \"image_height\": " << height << ",\n  \"boxes\": [\n";
-            for (size_t i=0;i<boxes.size();++i){
-                auto& b = boxes[i];
-                j << "    {\"label\": \"" << b.label << "\", \"xmin\": " << b.x0
-                  << ", \"ymin\": " << b.y0 << ", \"xmax\": " << b.x1 << ", \"ymax\": " << b.y1 << "}";
-                if (i+1<boxes.size()) j << ",";
-                j << "\n";
-            }
-            j << "  ]\n}\n";
-            std::cout << "Wrote " << json << "\n";
-        }
-
-        // Instance mask + tight boxes from mask
-        write_inst_pgm(o.out + "/inst.pgm", gbuf);
-        std::cout << "Wrote " << (o.out + "/inst.pgm") << "\n";
-
         auto tight = boxes_from_mask(gbuf, reg);
-        write_boxes_csv (o.out + "/labels_from_mask.csv",  tight, width, height);
-        write_boxes_json(o.out + "/labels_from_mask.json", tight, width, height);
-        std::cout << "Wrote labels_from_mask.{csv,json}\n";
 
-        // YOLO / COCO
+        // inst.pgm (reuse the same gbuf scan we already have)
         {
-            std::vector<std::tuple<int,int,int,int,int>> yolo_boxes;
-            for (auto& b : tight) {
-                yolo_boxes.emplace_back(int(b.class_id), b.x0, b.y0, b.x1, b.y1);
+            FILE* pgm_fp = std::fopen((o.out + "/inst.pgm").c_str(), "wb");
+            if (pgm_fp) {
+                std::fprintf(pgm_fp, "P5\n%d %d\n255\n", width, height);
+                const size_t npix = static_cast<size_t>(width) * height;
+                std::vector<unsigned char> pgm_row(npix);
+                for (size_t i = 0; i < npix; ++i)
+                    pgm_row[i] = static_cast<unsigned char>(gbuf.inst_id[i] > 255 ? 255 : gbuf.inst_id[i]);
+                std::fwrite(pgm_row.data(), 1, npix, pgm_fp);
+                std::fclose(pgm_fp);
             }
-            write_yolo_txt(o.out + "/labels_yolo.txt", width, height, yolo_boxes);
-            std::cout << "Wrote " << (o.out + "/labels_yolo.txt") << "\n";
         }
+
+        // YOLO (fast-path)
+        write_yolo_fast(o.out + "/labels_yolo.txt", width, height, tight);
+
+        // COCO (fast-path)
         {
             CocoWriter coco;
-            coco.ensure_category(1, "cube");
-            int img_id = coco.add_image("image.ppm", width, height);
+            int img_id = coco.add_image("image.png", width, height);
             for (auto& b : tight) {
+                coco.ensure_category(b.class_id, b.label);
                 coco.add_box(img_id, b.class_id, b.x0, b.y0, b.x1, b.y1, b.instance_id, b.label);
             }
-            coco.write(o.out + "/labels_coco.json");
-            std::cout << "Wrote " << (o.out + "/labels_coco.json") << "\n";
+            write_coco_fast(o.out + "/labels_coco.json", coco);
         }
-    } // !depth_only
 
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double secs = std::chrono::duration<double>(t1 - t0).count();
-    int avg_spp = int(double(spp_accum) / double(width*height) + 0.5);
-    write_manifest(o.out, o, avg_spp, secs);
-    std::cout << "Done. avg_spp=" << avg_spp << ", time=" << secs << "s\n";
+        // Bounding box CSV + JSON (fast-path, single FILE*)
+        {
+            FILE* csv_fp = std::fopen((o.out + "/bboxes.csv").c_str(), "wb");
+            if (csv_fp) {
+                std::fprintf(csv_fp, "instance_id,class_id,label,xmin,ymin,xmax,ymax,width,height\n");
+                for (auto& b : tight)
+                    std::fprintf(csv_fp, "%u,%u,%s,%d,%d,%d,%d,%d,%d\n",
+                                 b.instance_id, b.class_id, b.label.c_str(),
+                                 b.x0, b.y0, b.x1, b.y1, width, height);
+                std::fclose(csv_fp);
+            }
+        }
+        {
+            FILE* json_fp = std::fopen((o.out + "/bboxes.json").c_str(), "wb");
+            if (json_fp) {
+                std::fprintf(json_fp, "{\"image_width\":%d,\"image_height\":%d,\"boxes\":[\n", width, height);
+                for (size_t i = 0; i < tight.size(); ++i) {
+                    auto& b = tight[i];
+                    std::fprintf(json_fp, "{\"instance_id\":%u,\"class_id\":%u,\"label\":\"%s\","
+                                 "\"xmin\":%d,\"ymin\":%d,\"xmax\":%d,\"ymax\":%d}%s\n",
+                                 b.instance_id, b.class_id, b.label.c_str(),
+                                 b.x0, b.y0, b.x1, b.y1,
+                                 (i + 1 < tight.size()) ? "," : "");
+                }
+                std::fprintf(json_fp, "]}\n");
+                std::fclose(json_fp);
+            }
+        }
+    }
+
+    write_manifest(o.out, o, avg_spp, render_secs);
+
+    auto t_io_end = std::chrono::high_resolution_clock::now();
+    double io_secs = std::chrono::duration<double>(t_io_end - t_io_start).count();
+    std::cout << "Done. render=" << render_secs << "s  io=" << io_secs << "s  avg_spp=" << avg_spp << "\n";
     return 0;
 }

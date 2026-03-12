@@ -1,31 +1,31 @@
-# Build & Distribution
+# Build
 build/
 dist/
 bin/
 
-# Render Outputs (The "Data" - keep this out of Git)
+# Render & dataset outputs
 out/
-temp_out/
-test_out/
-visionforge_data/
-runs/
-
-# Images & Data Files
+dataset/
+benchmark_dataset/
 *.ppm
 *.pgm
 *.exr
 *.png
 *.jpg
 *.jpeg
+
+# Label / annotation outputs
 *.csv
 *.json
-!data.yaml      # Keep config files, ignore the data
-!scene.json     # Keep your scene definitions
-!world.json     # Keep Forge randomization config
+!world.json
+!CMakePresets.json
 
-# Compiled Object Files & Libraries
-*.o
+# OBJ geometry files (compiled object overlap)
 *.obj
+!test_cube.obj
+
+# Compiled objects & libraries
+*.o
 *.so
 *.dylib
 *.dll
@@ -47,17 +47,17 @@ __pycache__/
 .venv/
 venv/
 ENV/
-*.pt            # Ignore model weights (keep these on a bucket/drive)
+*.pt
 *.onnx
 
-# IDEs & Editors
+# IDEs & editors
 .vscode/
 .idea/
 .DS_Store
 *.swp
 *.swo
 
-# CMake Generated Files
+# CMake generated
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake

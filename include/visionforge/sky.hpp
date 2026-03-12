@@ -53,28 +53,17 @@ public:
 
         // Subtle forward Rayleigh scatter toward the sun
         const double mu = std::max(0.0, dot(dir, sun_dir_));
-        const double rayleigh = std::pow(mu, 2.5);
+        const double rayleigh = mu * mu * std::sqrt(mu);
         const Vec3 rayleigh_tint(0.55, 0.70, 1.0);
         skycol += 0.25 * rayleigh * rayleigh_tint;
 
-        // Sun disc + warm halo
-        const double mu_c = std::clamp(mu, 0.0, 1.0);
-        const double ang  = std::acos(mu_c);
+        const double ang2 = std::max(0.0, 2.0 * (1.0 - std::clamp(mu, 0.0, 1.0)));
 
-        // Disc ~0.5° FWHM, halo ~5°
-        const double disc_sigma = 0.0045;
-        const double glow_sigma = 0.085;
-
-        const double disc = std::exp(-(ang*ang) / (2.0 * disc_sigma * disc_sigma));
-        const double glow = std::exp(-(ang*ang) / (2.0 * glow_sigma * glow_sigma));
+        const double disc = std::exp(ang2 * inv_disc_2s2_);
+        const double glow = std::exp(ang2 * inv_glow_2s2_);
 
         const Vec3 warm(1.00, 0.84, 0.62);
-
-        // Tuned to look good after ACES tonemap + sqrt "gamma"
-        const double disc_amp = 110.0;
-        const double glow_amp = 9.0;
-
-        Vec3 result = skycol + (disc_amp * disc + glow_amp * glow) * warm;
+        Vec3 result = skycol + (110.0 * disc + 9.0 * glow) * warm;
         return gain_ * result;
     }
 
@@ -82,4 +71,6 @@ private:
     Vec3  sun_dir_{0,1,0};
     double turb_{3.5};
     double gain_{1.0};
+    static constexpr double inv_disc_2s2_ = -1.0 / (2.0 * 0.0045 * 0.0045);
+    static constexpr double inv_glow_2s2_ = -1.0 / (2.0 * 0.085 * 0.085);
 };

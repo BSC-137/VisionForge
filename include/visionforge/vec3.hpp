@@ -2,6 +2,7 @@
 #define VEC3_H
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -9,9 +10,49 @@
 // ---------- constants ----------
 constexpr double PI = 3.14159265358979323846;
 
-// ---------- RNG ----------
+// ---------- Thread-local fast RNG (splitmix64 + xoshiro256+) ----------
+namespace vf_rng {
+
+inline uint64_t splitmix64(uint64_t& state) {
+    uint64_t z = (state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+struct Xoshiro256 {
+    uint64_t s[4];
+
+    void seed(uint64_t v) {
+        s[0] = splitmix64(v); s[1] = splitmix64(v);
+        s[2] = splitmix64(v); s[3] = splitmix64(v);
+    }
+
+    uint64_t next() {
+        const uint64_t result = s[0] + s[3];
+        const uint64_t t = s[1] << 17;
+        s[2] ^= s[0]; s[3] ^= s[1]; s[1] ^= s[2]; s[0] ^= s[3];
+        s[2] ^= t;
+        s[3] = (s[3] << 45) | (s[3] >> 19);
+        return result;
+    }
+
+    double next_double() {
+        return (next() >> 11) * 0x1.0p-53;
+    }
+};
+
+inline Xoshiro256& thread_rng() {
+    thread_local Xoshiro256 rng = []{ Xoshiro256 r; r.seed(1337); return r; }();
+    return rng;
+}
+
+inline void seed_thread_rng(uint64_t v) { thread_rng().seed(v); }
+
+} // namespace vf_rng
+
 inline double random_double() {
-    return rand() / (RAND_MAX + 1.0);
+    return vf_rng::thread_rng().next_double();
 }
 inline double random_double(double min, double max) {
     return min + (max - min) * random_double();
