@@ -21,6 +21,7 @@ runs/
 *.json
 !data.yaml      # Keep config files, ignore the data
 !scene.json     # Keep your scene definitions
+!world.json     # Keep Forge randomization config
 
 # Compiled Object Files & Libraries
 *.o

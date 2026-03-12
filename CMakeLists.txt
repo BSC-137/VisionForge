@@ -32,6 +32,7 @@ target_include_directories(visionforge INTERFACE
 # ---- IO (TinyEXR, fast_obj) ----
 add_library(vf_io STATIC
   src/io/exr_writer.cpp
+  src/io/png_writer.cpp
   src/io/fast_obj.cpp
 )
 target_include_directories(vf_io PUBLIC

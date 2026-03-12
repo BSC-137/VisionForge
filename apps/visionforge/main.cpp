@@ -41,6 +41,9 @@
 #include "visionforge/transform.hpp"
 #include "visionforge/mesh.hpp"
 #include "visionforge/exr_writer.hpp"
+#include "visionforge/png_writer.hpp"
+#include "visionforge/world_config.hpp"
+#include <nlohmann/json.hpp>
 
 
 #ifndef PI
@@ -410,6 +413,7 @@ static inline bool get_lambert_albedo(const std::shared_ptr<Material>& m, Vec3& 
     if (auto* lam = dynamic_cast<Lambertian*>(m.get())) { out_albedo = lam->albedo; return true; }
     return false;
 }
+static void apply_sand_bump(HitRecord& rec);
 
 // --------------- Integrator (unchanged except toggles wired to CLI) ---------------
 template<typename RectT>
@@ -460,11 +464,7 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
         }
     }
 
-    // micro bump only for sand material; frequency/scale set later via globals
-    if (rec.mat == sand_ptr) {
-        Vec3 g = g_bump.grad(rec.point * /*freq set later*/ 1.0); // scaled at call-site
-        // note: we fold freq and scale below
-    }
+    apply_sand_bump(rec);
 
     Vec3 emitted = rec.mat->emitted(rec);
 
@@ -568,8 +568,278 @@ static void write_manifest(const std::string& outdir, const Opts& o, int actual_
       << "}\n";
 }
 
+struct ForgeCli {
+    std::string config_path;
+    int frames = 0;
+};
+
+static void print_forge_usage() {
+    std::cout <<
+R"(VisionForge Forge — synthetic dataset generator
+
+Usage:
+  visionforge forge --config world.json --frames 100
+)";
+}
+
+static ForgeCli parse_forge_cli(int argc, char** argv) {
+    ForgeCli cli;
+    for (int i = 2; i < argc; ++i) {
+        std::string a(argv[i]);
+        if (a == "--config" && i + 1 < argc) cli.config_path = argv[++i];
+        else if (a == "--frames" && i + 1 < argc) cli.frames = std::stoi(argv[++i]);
+        else if (a == "--help" || a == "-h") {
+            print_forge_usage();
+            std::exit(0);
+        } else {
+            std::cerr << "Unknown forge flag: " << a << "\n";
+            print_forge_usage();
+            std::exit(2);
+        }
+    }
+    if (cli.config_path.empty() || cli.frames <= 0) {
+        print_forge_usage();
+        std::exit(2);
+    }
+    return cli;
+}
+
+static inline double sample_range(std::mt19937& rng, const ScalarRange& r) {
+    std::uniform_real_distribution<double> d(r.min, r.max);
+    return d(rng);
+}
+
+static inline Vec3 sample_range(std::mt19937& rng, const Vec3Range& r) {
+    std::uniform_real_distribution<double> dx(r.min.x, r.max.x);
+    std::uniform_real_distribution<double> dy(r.min.y, r.max.y);
+    std::uniform_real_distribution<double> dz(r.min.z, r.max.z);
+    return Vec3(dx(rng), dy(rng), dz(rng));
+}
+
+static int render_frame(const Opts& o,
+                        const Camera& cam,
+                        const BVHNode& world,
+                        const std::shared_ptr<YZRect>& rect_light,
+                        std::vector<unsigned char>& fb,
+                        GBuffer& gbuf) {
+    bool PREVIEW = o.preview;
+    int width = o.width;
+    int height = o.height;
+    int spp_target = PREVIEW ? o.spp_preview : o.spp;
+    int max_depth = PREVIEW ? 6 : o.max_depth;
+    int LIGHT_SAMPLES_PREVIEW = o.light_samples_preview;
+    int LIGHT_SAMPLES_FINAL = o.light_samples_final;
+    int MIN_SPP = o.min_spp;
+    double REL_NOISE_TARGET = o.rel_noise_target;
+
+    double F_NUMBER = 2.0;
+    double SHUTTER = 1.0 / 30.0;
+    int ISO = 400;
+    double exposure = exposure_scale(F_NUMBER, SHUTTER, ISO) * o.exposure_comp;
+
+    fb.assign(static_cast<size_t>(width) * static_cast<size_t>(height) * 3, 0);
+    long long spp_accum = 0;
+
+    #if defined(VF_USE_OMP)
+      #pragma omp parallel for schedule(dynamic, 1) reduction(+:spp_accum)
+    #endif
+    for (int j = height - 1; j >= 0; --j) {
+        for (int i = 0; i < width; ++i) {
+            Vec3 sum(0,0,0);
+            double meanL = 0.0, M2 = 0.0;
+            int s = 0;
+            int pix_index = ((height-1-j)*width + i);
+            for (; s < spp_target; ++s) {
+                double u = (i + random_double()) / (width  - 1);
+                double v = (j + random_double()) / (height - 1);
+                Ray r = cam.get_ray(u, v);
+                Vec3 c = ray_color(r, world, rect_light.get(), max_depth, max_depth,
+                                   PREVIEW, LIGHT_SAMPLES_PREVIEW, LIGHT_SAMPLES_FINAL,
+                                   6, o.max_depth, o.sky_gain,
+                                   o.show_light_on_primary, &gbuf, pix_index);
+                sum += c;
+
+                double L = luminance(c);
+                double delta = L - meanL;
+                meanL += delta / double(s + 1);
+                M2 += delta * (L - meanL);
+                if (s + 1 >= MIN_SPP) {
+                    double var = (s > 0) ? (M2 / s) : 0.0;
+                    double sigma = std::sqrt(std::max(0.0, var));
+                    double ci95 = 1.96 * sigma / std::sqrt(double(s + 1));
+                    if (ci95 < REL_NOISE_TARGET * std::max(1e-3, meanL)) break;
+                }
+            }
+            spp_accum += (s + 1);
+
+            Vec3 pixel = (sum / double(s + 1)) * exposure;
+            Vec3 mapped = aces_tonemap(pixel);
+            mapped = Vec3(std::sqrt(mapped.x), std::sqrt(mapped.y), std::sqrt(mapped.z));
+            int idx = pix_index * 3;
+            fb[idx + 0] = (unsigned char)(256 * clamp01(mapped.x));
+            fb[idx + 1] = (unsigned char)(256 * clamp01(mapped.y));
+            fb[idx + 2] = (unsigned char)(256 * clamp01(mapped.z));
+        }
+    }
+
+    return int(double(spp_accum) / double(width * height) + 0.5);
+}
+
+static int run_forge_subcommand(int argc, char** argv) {
+    using json = nlohmann::json;
+    ForgeCli cli = parse_forge_cli(argc, argv);
+    WorldConfig cfg = load_world_config(cli.config_path);
+
+    std::filesystem::create_directories(cfg.dataset.root);
+    const std::string train_dir = cfg.dataset.root + "/train";
+    const std::string val_dir = cfg.dataset.root + "/val";
+    std::filesystem::create_directories(train_dir);
+    std::filesystem::create_directories(val_dir);
+
+    Opts o;
+    o.width = cfg.render.width;
+    o.height = cfg.render.height;
+    o.spp = cfg.render.spp;
+    o.max_depth = cfg.render.max_depth;
+    o.exposure_comp = cfg.render.exposure;
+    o.sky_gain = cfg.render.sky_gain;
+    o.preview = cfg.render.preview;
+    o.seed = cfg.render.seed;
+    o.write_exr = true;
+
+    sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
+    HeightField hf(cfg.terrain.xmin, cfg.terrain.xmax,
+                   cfg.terrain.zmin, cfg.terrain.zmax,
+                   cfg.terrain.nx, cfg.terrain.nz,
+                   cfg.terrain.amp, cfg.terrain.scale,
+                   cfg.render.seed);
+    hf.generate();
+
+    HittableList static_world;
+    auto sun_em = std::make_shared<DiffuseLight>(o.light_color, o.light_intensity);
+    auto rect_light = std::make_shared<YZRect>(o.light_y0, o.light_y1, o.light_z0, o.light_z1, o.light_x, sun_em);
+    static_world.add(rect_light);
+    hf.to_triangles(static_world, sand_ptr);
+
+    bool color_ok = true;
+    std::string unused_label;
+    Vec3 obj_col = parse_color_one(cfg.asset.color, color_ok, unused_label);
+    auto obj_mat = std::make_shared<Lambertian>(obj_col);
+    auto base_mesh = Mesh::from_obj(cfg.asset.obj, obj_mat, Vec3(0, 0, 0), cfg.asset.scale);
+    if (!base_mesh) {
+        std::cerr << "Forge: failed to load OBJ asset: " << cfg.asset.obj << "\n";
+        return 2;
+    }
+
+    std::mt19937 dr_rng(cfg.render.seed ^ 0x9e3779b1u);
+    int train_count = static_cast<int>(std::round(cli.frames * cfg.dataset.train_split));
+
+    for (int frame = 0; frame < cli.frames; ++frame) {
+        std::cout << "Generating frame " << (frame + 1) << "/" << cli.frames << "...\n";
+
+        Vec3 lookfrom = sample_range(dr_rng, cfg.camera.lookfrom);
+        double fov = sample_range(dr_rng, cfg.camera.fov_deg);
+        double sun_az = sample_range(dr_rng, cfg.lighting.sun_azimuth_deg);
+        double sun_el = sample_range(dr_rng, cfg.lighting.sun_elevation_deg);
+        double obj_x = sample_range(dr_rng, cfg.placement.x);
+        double obj_z = sample_range(dr_rng, cfg.placement.z);
+        double obj_yaw = sample_range(dr_rng, cfg.placement.yaw_deg);
+        double obj_y = hf.height_at(obj_x, obj_z) + cfg.asset.y_offset;
+
+        g_sky.set_angles(sun_az, sun_el);
+        g_sky.set_turbidity(o.turbidity);
+
+        HittableList frame_world;
+        frame_world.objects = static_world.objects;
+
+        std::shared_ptr<Hittable> posed = std::make_shared<RotateY>(base_mesh, obj_yaw);
+        posed = std::make_shared<Translate>(posed, Vec3(obj_x, obj_y, obj_z));
+        ObjectInfo obj_info{1u, cfg.asset.class_id, cfg.asset.label.c_str()};
+        frame_world.add(std::make_shared<Tag>(posed, obj_info));
+
+        std::vector<std::shared_ptr<Hittable>> objs_vec = frame_world.objects;
+        BVHNode world(objs_vec, 0, objs_vec.size());
+
+        const double aspect = double(o.width) / double(o.height);
+        const double focus_dist = (lookfrom - cfg.camera.lookat).length();
+        Camera cam(lookfrom, cfg.camera.lookat, cfg.camera.up, fov, aspect, 0.0, focus_dist, 0.0, 1.0);
+
+        std::srand(o.seed + static_cast<unsigned>(frame));
+        std::vector<unsigned char> fb;
+        GBuffer gbuf(o.width, o.height);
+        int avg_spp = render_frame(o, cam, world, rect_light, fb, gbuf);
+
+        const std::string split_dir = (frame < train_count) ? train_dir : val_dir;
+        std::ostringstream base_name;
+        base_name << "frame_" << std::setw(4) << std::setfill('0') << frame;
+        const std::string stem = base_name.str();
+
+        const std::string png_path = split_dir + "/" + stem + ".png";
+        const std::string exr_path = split_dir + "/" + stem + "_spatial.exr";
+        const std::string meta_path = split_dir + "/" + stem + "_meta.json";
+
+        if (!vf::write_png_rgb8(png_path.c_str(), o.width, o.height, fb.data())) {
+            std::cerr << "Forge: failed to write PNG: " << png_path << "\n";
+            return 2;
+        }
+        if (!vf::write_gbuffer_exr(exr_path.c_str(), gbuf)) {
+            std::cerr << "Forge: failed to write EXR: " << exr_path << "\n";
+            return 2;
+        }
+
+        const double yaw_rad = obj_yaw * PI / 180.0;
+        const double c = std::cos(yaw_rad);
+        const double s = std::sin(yaw_rad);
+        json meta;
+        meta["frame_id"] = frame;
+        meta["split"] = (frame < train_count) ? "train" : "val";
+        meta["image_width"] = o.width;
+        meta["image_height"] = o.height;
+        meta["render"] = {
+            {"spp_target", o.spp},
+            {"spp_avg", avg_spp},
+            {"max_depth", o.max_depth},
+            {"seed", o.seed + static_cast<unsigned>(frame)}
+        };
+        meta["camera"] = {
+            {"lookfrom", {lookfrom.x, lookfrom.y, lookfrom.z}},
+            {"lookat", {cfg.camera.lookat.x, cfg.camera.lookat.y, cfg.camera.lookat.z}},
+            {"up", {cfg.camera.up.x, cfg.camera.up.y, cfg.camera.up.z}},
+            {"fov_deg", fov}
+        };
+        meta["sun"] = {
+            {"azimuth_deg", sun_az},
+            {"elevation_deg", sun_el}
+        };
+        meta["objects"] = json::array();
+        meta["objects"].push_back({
+            {"instance_id", 1},
+            {"class_id", cfg.asset.class_id},
+            {"label", cfg.asset.label},
+            {"position", {obj_x, obj_y, obj_z}},
+            {"rotation_y_deg", obj_yaw},
+            {"local_to_world", {
+                {c, 0.0, s, obj_x},
+                {0.0, 1.0, 0.0, obj_y},
+                {-s, 0.0, c, obj_z},
+                {0.0, 0.0, 0.0, 1.0}
+            }}
+        });
+
+        std::ofstream meta_out(meta_path);
+        meta_out << std::setw(2) << meta << "\n";
+    }
+
+    std::cout << "Forge complete. Dataset written to " << cfg.dataset.root << "\n";
+    return 0;
+}
+
 // ---------------------------- MAIN ----------------------------
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "forge") {
+        return run_forge_subcommand(argc, argv);
+    }
+
     Opts o = parse(argc, argv);
     std::srand(o.seed);
 

@@ -146,3 +146,56 @@ public:
 
     bool bounding_box(AABB& out_box) const override { out_box = box; return true; }
 };
+
+// ---------------- RotateY ----------------
+class RotateY : public Hittable {
+public:
+    std::shared_ptr<Hittable> ptr;
+    double sin_t, cos_t;
+    AABB box;
+
+    explicit RotateY(std::shared_ptr<Hittable> p, double angle_deg)
+    : ptr(std::move(p)) {
+        double rad = angle_deg * PI / 180.0;
+        sin_t = std::sin(rad);
+        cos_t = std::cos(rad);
+
+        AABB b;
+        if (ptr->bounding_box(b)) {
+            Vec3 minv( 1e9, 1e9, 1e9), maxv(-1e9,-1e9,-1e9);
+            for (int i=0;i<2;i++) for (int j=0;j<2;j++) for (int k=0;k<2;k++) {
+                double x = i ? b.max().x : b.min().x;
+                double y = j ? b.max().y : b.min().y;
+                double z = k ? b.max().z : b.min().z;
+                double nx =  cos_t*x + sin_t*z;
+                double nz = -sin_t*x + cos_t*z;
+                Vec3 p(nx, y, nz);
+                minv = Vec3(std::min(minv.x,p.x), std::min(minv.y,p.y), std::min(minv.z,p.z));
+                maxv = Vec3(std::max(maxv.x,p.x), std::max(maxv.y,p.y), std::max(maxv.z,p.z));
+            }
+            box = AABB(minv, maxv);
+        }
+    }
+
+    bool hit(const Ray& r, double tmin, double tmax, HitRecord& rec) const override {
+        Vec3 o = r.origin, d = r.direction;
+        o.x =  cos_t*r.origin.x - sin_t*r.origin.z;
+        o.z =  sin_t*r.origin.x + cos_t*r.origin.z;
+        d.x =  cos_t*r.direction.x - sin_t*r.direction.z;
+        d.z =  sin_t*r.direction.x + cos_t*r.direction.z;
+
+        Ray rr(o, d, r.time);
+        if (!ptr->hit(rr, tmin, tmax, rec)) return false;
+
+        double x = cos_t*rec.point.x + sin_t*rec.point.z;
+        double z =-sin_t*rec.point.x + cos_t*rec.point.z;
+        rec.point.x = x; rec.point.z = z;
+
+        double nx = cos_t*rec.normal.x + sin_t*rec.normal.z;
+        double nz =-sin_t*rec.normal.x + cos_t*rec.normal.z;
+        rec.normal.x = nx; rec.normal.z = nz;
+        return true;
+    }
+
+    bool bounding_box(AABB& out_box) const override { out_box = box; return true; }
+};
