@@ -46,6 +46,10 @@
 #include "visionforge/pbr_material.hpp"
 #include "visionforge/terrain.hpp"
 #include "visionforge/placement.hpp"
+#include "visionforge/hdr_sky.hpp"
+#include "visionforge/image_texture.hpp"
+#include "visionforge/triplanar_material.hpp"
+#include "visionforge/asset_manager.hpp"
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <mutex>
@@ -222,6 +226,14 @@ struct Opts {
 
     // Dataset toggles (keeping default on)
     bool write_bbox_overlay = true;
+
+    // HDR sky
+    std::string hdr_path;
+    double hdr_intensity = 1.0;
+
+    // Ground texture (triplanar)
+    std::string ground_tex_path;
+    double ground_scale = 2.0;
 };
 
 static void print_usage() {
@@ -245,6 +257,8 @@ Usage:
               [--show-light true|false] [--match-sky true|false]
               [--obj PATH] [--obj-pos "x,y,z"] [--obj-scale S]
               [--obj-color "name|#hex|r,g,b"] [--sink D]
+              [--hdr PATH] [--hdr-intensity F]
+              [--ground-tex PATH] [--ground-scale F]
               [--exr] [--depth-only]
               [--help]
 
@@ -313,6 +327,11 @@ static Opts parse(int argc, char** argv) {
         else if (a=="--obj-color")       o.obj_color = argv[need(i)];
         else if (a=="--sink")            o.obj_sink = std::stod(argv[need(i)]);
 
+        else if (a=="--hdr")             o.hdr_path = argv[need(i)];
+        else if (a=="--hdr-intensity")   o.hdr_intensity = std::stod(argv[need(i)]);
+        else if (a=="--ground-tex")      o.ground_tex_path = argv[need(i)];
+        else if (a=="--ground-scale")    o.ground_scale = std::stod(argv[need(i)]);
+
         else if (a=="--exr")             o.write_exr = true;
         else if (a=="--depth-only")    { o.depth_only = true; o.write_exr = true; }
 
@@ -330,6 +349,8 @@ static Opts parse(int argc, char** argv) {
 static vf::perlin g_bump(424242);
 static Sky g_sky(/*az*/300.0, /*el*/12.0, /*turb*/3.5);
 static std::shared_ptr<Lambertian> sand_ptr;
+static std::shared_ptr<HDRSky> g_hdr_sky;
+static std::shared_ptr<Material> g_terrain_mat;
 
 static inline double pbr_saturate(double x) { return std::clamp(x, 0.0, 1.0); }
 
@@ -424,7 +445,10 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
             gbuf->normal_y[pix_index] = 0.0f;
             gbuf->normal_z[pix_index] = 0.0f;
         }
-        if (depth == max_depth) return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
+        if (depth == max_depth) {
+            Vec3 dir = normalize(r.direction);
+            return g_hdr_sky ? g_hdr_sky->eval(dir) : g_sky.eval(dir) * SKY_VIEW_GAIN;
+        }
         return Vec3(0,0,0);
     }
 
@@ -449,7 +473,8 @@ Vec3 ray_color(const Ray& r, const Hittable& world, const RectT* area_light, int
                 gbuf->normal_y[pix_index] = 0.0f;
                 gbuf->normal_z[pix_index] = 0.0f;
             }
-            return g_sky.eval(normalize(r.direction)) * SKY_VIEW_GAIN;
+            Vec3 dir = normalize(r.direction);
+            return g_hdr_sky ? g_hdr_sky->eval(dir) : g_sky.eval(dir) * SKY_VIEW_GAIN;
         }
     }
 
@@ -521,7 +546,7 @@ static double G_BUMP_SCALE = 0.22;
 
 // Slightly modified Lambertian normal perturbation for sand
 static void apply_sand_bump(HitRecord& rec) {
-    if (rec.mat != sand_ptr) return;
+    if (rec.mat != sand_ptr && rec.mat != g_terrain_mat) return;
     Vec3 g = g_bump.grad(rec.point * G_BUMP_FREQ);
     g = g - rec.normal * dot(g, rec.normal);
     rec.normal = normalize(rec.normal + G_BUMP_SCALE * g);
@@ -562,6 +587,18 @@ static void write_manifest(const std::string& outdir, const Opts& o, int actual_
 struct ForgeCli {
     std::string config_path;
     int frames = 0;
+
+    // Quality overrides (Bun-style CLI authority)
+    int width  = -1;
+    int height = -1;
+    int spp    = -1;
+
+    // HDR / ground / debug overrides
+    std::string hdr_path = "";
+    double hdr_intensity = -1.0;
+    std::string ground_tex = "";
+    double ground_scale = -1.0;
+    bool verbose = false;
 };
 
 static void print_forge_usage() {
@@ -579,10 +616,20 @@ static ForgeCli parse_forge_cli(int argc, char** argv) {
         std::string a(argv[i]);
         if (a == "--config" && i + 1 < argc) cli.config_path = argv[++i];
         else if (a == "--frames" && i + 1 < argc) cli.frames = std::stoi(argv[++i]);
+        else if (a == "--width" && i + 1 < argc)  cli.width  = std::stoi(argv[++i]);
+        else if (a == "--height" && i + 1 < argc) cli.height = std::stoi(argv[++i]);
+        else if (a == "--spp" && i + 1 < argc)    cli.spp    = std::stoi(argv[++i]);
+        // --- New forge-only flags ---
+        else if (a == "--hdr" && i + 1 < argc) cli.hdr_path = argv[++i];
+        else if (a == "--hdr-intensity" && i + 1 < argc) cli.hdr_intensity = std::stod(argv[++i]);
+        else if (a == "--ground-tex" && i + 1 < argc) cli.ground_tex = argv[++i];
+        else if (a == "--ground-scale" && i + 1 < argc) cli.ground_scale = std::stod(argv[++i]);
+        else if (a == "--verbose") cli.verbose = true;
         else if (a == "--help" || a == "-h") {
             print_forge_usage();
             std::exit(0);
         } else {
+            // This is the error you were seeing:
             std::cerr << "Unknown forge flag: " << a << "\n";
             print_forge_usage();
             std::exit(2);
@@ -901,6 +948,22 @@ static int run_forge_subcommand(int argc, char** argv) {
     ForgeCli cli = parse_forge_cli(argc, argv);
     WorldConfig cfg = load_world_config(cli.config_path);
 
+    // --- Bun-style CLI Overrides ---
+    // These allow terminal flags to win over world.json values
+    if (cli.width  > 0) cfg.render.width  = cli.width;
+    if (cli.height > 0) cfg.render.height = cli.height;
+    if (cli.spp    > 0) cfg.render.spp    = cli.spp;
+
+    if (!cli.hdr_path.empty()) cfg.hdr_path = cli.hdr_path;
+    if (cli.hdr_intensity > 0) cfg.hdr_intensity = cli.hdr_intensity;
+    if (!cli.ground_tex.empty()) cfg.ground_tex = cli.ground_tex;
+    if (cli.ground_scale > 0) cfg.ground_scale = cli.ground_scale;
+
+    if (cli.verbose) {
+        std::cout << "[FORGE] Environment: " << (cfg.hdr_path.empty() ? "Analytic Sky" : cfg.hdr_path) << "\n"
+                  << "[FORGE] Ground Tex:  " << (cfg.ground_tex.empty() ? "Flat Color" : cfg.ground_tex) << "\n";
+    }
+
     std::filesystem::create_directories(cfg.dataset.root);
     const std::string train_dir = cfg.dataset.root + "/train";
     const std::string val_dir = cfg.dataset.root + "/val";
@@ -908,20 +971,40 @@ static int run_forge_subcommand(int argc, char** argv) {
     std::filesystem::create_directories(val_dir);
 
     Opts o;
-    o.width = cfg.render.width;
-    o.height = cfg.render.height;
-    o.spp = cfg.render.spp;
-    o.max_depth = cfg.render.max_depth;
+    o.width         = cfg.render.width;
+    o.height        = cfg.render.height;
+    o.spp           = cfg.render.spp;
+    o.max_depth     = cfg.render.max_depth;
     o.exposure_comp = cfg.render.exposure;
-    o.sky_gain = cfg.render.sky_gain;
-    o.preview = cfg.render.preview;
-    o.seed = cfg.render.seed;
-    o.write_exr = true;
-    o.max_depth = 2;
+    o.sky_gain      = cfg.render.sky_gain;
+    o.preview       = cfg.render.preview;
+    o.seed          = cfg.render.seed;
+    o.write_exr     = true;
+
+    // Adaptive sampling guardrails for forge:
+    // - keep min_spp reasonably high so dark regions converge
+    // - relax noise target for speed (dataset focus)
+    o.min_spp          = 8;
+    o.rel_noise_target = 0.1;
     o.light_samples_final = 1;
-    o.min_spp = 1;
-    o.rel_noise_target = 1.0;
-    o.spp = 1;
+
+    // --- Phase 6: Global Resource Initialization ---
+    if (!cfg.hdr_path.empty()) {
+        g_hdr_sky = std::make_shared<HDRSky>();
+        if (!g_hdr_sky->load(cfg.hdr_path, cfg.hdr_intensity)) {
+            std::cerr << "Forge: failed to load HDR sky: " << cfg.hdr_path << "\n";
+            g_hdr_sky.reset();
+        }
+    }
+
+    if (!cfg.ground_tex.empty()) {
+        auto img = std::make_shared<ImageTexture>();
+        if (img->load(cfg.ground_tex)) {
+            g_terrain_mat = std::make_shared<TriplanarMaterial>(img, cfg.ground_scale);
+        } else {
+            std::cerr << "Forge: failed to load ground texture: " << cfg.ground_tex << "\n";
+        }
+    }
 
     sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
     HeightField hf(cfg.terrain.xmin, cfg.terrain.xmax,
@@ -935,34 +1018,27 @@ static int run_forge_subcommand(int argc, char** argv) {
     auto sun_em = std::make_shared<DiffuseLight>(o.light_color, o.light_intensity);
     auto rect_light = std::make_shared<YZRect>(o.light_y0, o.light_y1, o.light_z0, o.light_z1, o.light_x, sun_em);
     static_world.add(rect_light);
-    hf.to_triangles(static_world, sand_ptr);
+    
+    // Use triplanar if available, else standard sand
+    hf.to_triangles(static_world, g_terrain_mat ? g_terrain_mat : sand_ptr);
+    
     std::vector<std::shared_ptr<Hittable>> static_objs = static_world.objects;
     auto static_bvh = std::make_shared<BVHNode>(static_objs, 0, static_objs.size());
 
-    bool color_ok = true;
-    std::string unused_label;
-    Vec3 obj_col = parse_color_one(cfg.asset.color, color_ok, unused_label);
-    auto obj_mat = std::make_shared<PBRMaterial>(obj_col, cfg.asset.roughness.min, cfg.asset.metallic.min);
-    auto base_mesh = Mesh::from_obj(cfg.asset.obj, obj_mat, Vec3(0, 0, 0), cfg.asset.scale);
-    if (!base_mesh) {
-        std::cerr << "Forge: failed to load OBJ asset: " << cfg.asset.obj << "\n";
+    AssetManager asset_mgr;
+    if (!asset_mgr.load_all(cfg.assets, parse_color_one)) {
+        std::cerr << "Forge: failed to load assets\n";
         return 2;
     }
 
     std::mt19937 dr_rng(cfg.render.seed ^ 0x9e3779b1u);
-    std::uniform_real_distribution<double> sink_rng(0.02, 0.10);
+    std::uniform_real_distribution<double> sink_rng(0.01, 0.05); // Realistic sink range
     int train_count = static_cast<int>(std::round(cli.frames * cfg.dataset.train_split));
 
     const double aspect = double(o.width) / double(o.height);
     std::vector<unsigned char> fb;
     fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
     GBuffer gbuf(o.width, o.height);
-
-    auto rotate_node = std::make_shared<RotateY>(base_mesh, 0.0);
-    auto slope_node = std::make_shared<SlopeAlign>(rotate_node, Vec3(0, 1, 0));
-    auto translate_node = std::make_shared<Translate>(slope_node, Vec3(0, 0, 0));
-    ObjectInfo obj_info{1u, cfg.asset.class_id, cfg.asset.label.c_str()};
-    auto tag_node = std::make_shared<Tag>(translate_node, obj_info);
 
     HittableList frame_world;
     frame_world.objects.reserve(2);
@@ -978,25 +1054,43 @@ static int run_forge_subcommand(int argc, char** argv) {
         double obj_x = sample_range(dr_rng, cfg.placement.x);
         double obj_z = sample_range(dr_rng, cfg.placement.z);
         double obj_yaw = sample_range(dr_rng, cfg.placement.yaw_deg);
+        
         auto terrain_sample = hf.get_terrain_height_and_normal(obj_x, obj_z);
-        double obj_roughness = sample_range(dr_rng, cfg.asset.roughness);
-        double obj_metallic = sample_range(dr_rng, cfg.asset.metallic);
-        obj_mat->set_parameters(obj_col, obj_roughness, obj_metallic);
+        auto& asset = asset_mgr.select(dr_rng);
+        
+        double obj_roughness = sample_range(dr_rng, asset.config.roughness);
+        double obj_metallic = sample_range(dr_rng, asset.config.metallic);
+        asset.material->set_parameters(asset.material->base_color, obj_roughness, obj_metallic);
 
         g_sky.set_angles(sun_az, sun_el);
-        g_sky.set_turbidity(o.turbidity);
 
-        *rotate_node = RotateY(base_mesh, obj_yaw);
-        slope_node->set_from_normal(terrain_sample.normal);
+        // --- Phase 5: Grounding Math ---
+        *asset.rotate_node = RotateY(asset.mesh, obj_yaw);
+        asset.slope_node->set_from_normal(terrain_sample.normal);
+        
         AABB obj_aabb;
-        slope_node->bounding_box(obj_aabb);
+        asset.slope_node->bounding_box(obj_aabb);
         double frame_sink = sink_rng(dr_rng);
-        double obj_y = snap_y(terrain_sample.height, obj_aabb.max().y - obj_aabb.min().y, frame_sink) + cfg.asset.y_offset;
-        translate_node->offset = Vec3(obj_x, obj_y, obj_z);
+        
+        // Gravity Snap + User Offset - Randomized Sink
+        double obj_y = snap_y(terrain_sample.height, obj_aabb.max().y - obj_aabb.min().y, frame_sink) + asset.config.y_offset;
+        asset.translate_node->offset = Vec3(obj_x, obj_y, obj_z);
+
+        // --- Mathematical Verification Log ---
+        if (cli.verbose) {
+            std::printf("[FRAME %04d] Asset: %s | Snap-Y: %.2f | Normal: (%.2f, %.2f, %.2f) | Sink: %.2f\n",
+                        frame,
+                        asset.config.label.c_str(),
+                        obj_y,
+                        terrain_sample.normal.x,
+                        terrain_sample.normal.y,
+                        terrain_sample.normal.z,
+                        frame_sink);
+        }
 
         frame_world.objects.clear();
         frame_world.objects.push_back(static_bvh);
-        frame_world.objects.push_back(tag_node);
+        frame_world.objects.push_back(asset.tag_node);
 
         const double focus_dist = (lookfrom - cfg.camera.lookat).length();
         Camera cam(lookfrom, cfg.camera.lookat, cfg.camera.up, fov, aspect, 0.0, focus_dist, 0.0, 1.0);
@@ -1004,8 +1098,9 @@ static int run_forge_subcommand(int argc, char** argv) {
         vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(frame));
         gbuf.clear();
         auto t_render_start = std::chrono::high_resolution_clock::now();
-        int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, /*primary_hit_lighting_only=*/true);
+        int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, true);
         auto t_render_end = std::chrono::high_resolution_clock::now();
+        
         double render_ms = std::chrono::duration<double, std::milli>(t_render_end - t_render_start).count();
         total_render_ms += render_ms;
 
@@ -1015,32 +1110,15 @@ static int run_forge_subcommand(int argc, char** argv) {
         std::snprintf(stem_buf, sizeof(stem_buf), "frame_%04d", frame);
 
         ForgeFrameData fd;
-        fd.frame_id = frame;
-        fd.width = o.width;
-        fd.height = o.height;
-        fd.avg_spp = avg_spp;
-        fd.is_train = is_train;
-        fd.split_dir = split_dir;
-        fd.stem = stem_buf;
-        fd.fb = std::move(fb);
-        fd.gbuf = std::move(gbuf);
-        fd.lookfrom = lookfrom;
-        fd.lookat = cfg.camera.lookat;
-        fd.up = cfg.camera.up;
-        fd.fov = fov;
-        fd.sun_az = sun_az;
-        fd.sun_el = sun_el;
-        fd.obj_x = obj_x;
-        fd.obj_y = obj_y;
-        fd.obj_z = obj_z;
-        fd.obj_yaw = obj_yaw;
-        fd.obj_roughness = obj_roughness;
-        fd.obj_metallic = obj_metallic;
-        fd.class_id = cfg.asset.class_id;
-        fd.label = cfg.asset.label;
-        fd.spp_target = o.spp;
-        fd.max_depth = o.max_depth;
-        fd.seed = o.seed + static_cast<unsigned>(frame);
+        fd.frame_id = frame; fd.width = o.width; fd.height = o.height;
+        fd.avg_spp = avg_spp; fd.is_train = is_train; fd.split_dir = split_dir; fd.stem = stem_buf;
+        fd.fb = std::move(fb); fd.gbuf = std::move(gbuf);
+        fd.lookfrom = lookfrom; fd.lookat = cfg.camera.lookat; fd.up = cfg.camera.up; fd.fov = fov;
+        fd.sun_az = sun_az; fd.sun_el = sun_el;
+        fd.obj_x = obj_x; fd.obj_y = obj_y; fd.obj_z = obj_z; fd.obj_yaw = obj_yaw;
+        fd.obj_roughness = obj_roughness; fd.obj_metallic = obj_metallic;
+        fd.class_id = asset.config.class_id; fd.label = asset.config.label;
+        fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
 
         io_worker.push(std::move(fd));
 
@@ -1048,24 +1126,15 @@ static int run_forge_subcommand(int argc, char** argv) {
         fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
         gbuf = GBuffer(o.width, o.height);
 
-        std::cout << "Frame " << (frame + 1) << "/" << cli.frames
-                  << "  render=" << int(render_ms) << "ms\n";
+        if (cli.verbose) {
+            std::cout << "Frame " << (frame + 1) << "/" << cli.frames << "  render=" << (int)render_ms << "ms\n";
+        }
     }
 
-    std::cout << "Rendering done. Avg render: "
-              << int(total_render_ms / cli.frames) << "ms/frame. Flushing I/O...\n";
+    std::cout << "Rendering done. Avg render: " << (int)(total_render_ms / cli.frames) << "ms/frame. Flushing I/O...\n";
     io_worker.drain();
-
-    const std::string coco_train = train_dir + "/annotations_coco.json";
-    const std::string coco_val   = val_dir   + "/annotations_coco.json";
     write_coco_fast(cfg.dataset.root + "/annotations_coco.json", io_worker.coco());
 
-    if (io_worker.had_error()) {
-        std::cerr << "Forge: I/O errors occurred.\n";
-        return 2;
-    }
-
-    std::cout << "Forge complete. Dataset written to " << cfg.dataset.root << "\n";
     return 0;
 }
 
@@ -1109,6 +1178,15 @@ int main(int argc, char** argv) {
     g_sky.set_angles(o.sun_az_deg, o.sun_el_deg); // requires small setter; see notes below
     g_sky.set_turbidity(o.turbidity);
 
+    // HDR sky
+    if (!o.hdr_path.empty()) {
+        g_hdr_sky = std::make_shared<HDRSky>();
+        if (!g_hdr_sky->load(o.hdr_path, o.hdr_intensity)) {
+            std::cerr << "Warning: failed to load HDR sky: " << o.hdr_path << "\n";
+            g_hdr_sky.reset();
+        }
+    }
+
     // materials
     sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
     auto red_m  = std::make_shared<Lambertian>(Vec3(0.90, 0.18, 0.14));
@@ -1119,6 +1197,17 @@ int main(int argc, char** argv) {
     // sand bump controls
     G_BUMP_FREQ  = o.sand_bump_freq;
     G_BUMP_SCALE = o.sand_bump_scale;
+
+    // ground texture (triplanar)
+    if (!o.ground_tex_path.empty()) {
+        auto img = std::make_shared<ImageTexture>();
+        if (img->load(o.ground_tex_path)) {
+            auto tri_mat = std::make_shared<TriplanarMaterial>(img, o.ground_scale);
+            g_terrain_mat = tri_mat;
+        } else {
+            std::cerr << "Warning: failed to load ground texture, using default sand.\n";
+        }
+    }
 
     // terrain
     HeightField hf(o.XMIN, o.XMAX, o.ZMIN, o.ZMAX, o.terrain_nx, o.terrain_nz, o.terrain_amp, o.terrain_scale, /*seed*/1337);
@@ -1301,8 +1390,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    // tessellate sand
-    hf.to_triangles(objects, sand_ptr);
+    // tessellate sand (use triplanar material if available)
+    hf.to_triangles(objects, g_terrain_mat ? g_terrain_mat : sand_ptr);
 
     // BVH
     std::vector<std::shared_ptr<Hittable>> objs_vec = objects.objects;

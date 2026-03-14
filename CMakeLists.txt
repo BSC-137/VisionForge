@@ -34,6 +34,7 @@ add_library(vf_io STATIC
   src/io/exr_writer.cpp
   src/io/png_writer.cpp
   src/io/fast_obj.cpp
+  src/io/stb_image_impl.cpp
 )
 target_include_directories(vf_io PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include

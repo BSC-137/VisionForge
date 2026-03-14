@@ -14,7 +14,9 @@
 * **One-pass labeling**: bounding boxes computed from the G-Buffer in a single scan, feeding YOLO `.txt`, COCO `.json`, CSV, and JSON simultaneously
 * **BVH acceleration** with longest-extent axis splitting over all scene primitives
 * **Procedural terrain**: ridged fractal heightfield with domain-warped Perlin noise and micro-bump normals
-* **Analytic sky** with sun disc, warm halo, and Rayleigh scatter
+* **Semantic grounding**: terrain-aware gravity snapping + slope alignment, so cubes and assets sit flush on dunes with a controllable “sink” depth
+* **Analytic sky + HDR IBL**: built-in sky model with sun + optional `.hdr` environment maps via `stb_image.h` (equirectangular projection)
+* **Triplanar terrain texturing**: “no-UV” ground material that blends a single texture along XYZ, avoiding stretching on steep slopes
 * **Geometry**: OBJ mesh loading (via fast_obj), triangles, axis-aligned rectangles, procedural heightfields
 * **Materials**: PBR (metallic/roughness), Lambertian diffuse, dielectric, metal, emissive area lights
 * **Adaptive sampling** with Welford variance and 95% confidence interval early termination
@@ -29,11 +31,17 @@ VisionForge/
 ├─ apps/visionforge/main.cpp       # CLI application (manual + forge paths)
 ├─ include/visionforge/            # Engine headers
 │  ├─ pbr_material.hpp             #   PBR material (Cook-Torrance, GGX sampling)
-│  ├─ world_config.hpp             #   Forge JSON config parser
+│  ├─ world_config.hpp             #   Forge JSON config parser (render, camera, lighting, terrain, assets[])
 │  ├─ mesh.hpp                     #   OBJ mesh loader (per-mesh BVH)
 │  ├─ bvh.hpp                      #   BVH node (longest-extent axis split)
 │  ├─ passes.hpp                   #   GBuffer (depth, normals, instance IDs)
 │  ├─ sky.hpp                      #   Analytic sky model
+│  ├─ hdr_sky.hpp                  #   HDR environment sky (equirectangular .hdr)
+│  ├─ image_texture.hpp            #   Shared float textures with bilinear sampling
+│  ├─ triplanar_material.hpp       #   Triplanar terrain material using ImageTexture
+│  ├─ asset_manager.hpp            #   Multi-asset loader + weighted selection
+│  ├─ terrain.hpp                  #   HeightField + world-space height/normal queries
+│  ├─ placement.hpp                #   SlopeAlign + snap_y grounding helpers
 │  ├─ vec3.hpp                     #   Vec3 + thread-local xoshiro256+ PRNG
 │  ├─ exr_writer.hpp               #   EXR export
 │  ├─ png_writer.hpp               #   PNG export (zlib)
@@ -41,12 +49,14 @@ VisionForge/
 ├─ src/io/
 │  ├─ exr_writer.cpp               # TinyEXR implementation
 │  ├─ png_writer.cpp               # Minimal PNG writer
-│  └─ fast_obj.cpp                 # fast_obj implementation unit
+│  ├─ fast_obj.cpp                 # fast_obj implementation unit
+│  └─ stb_image_impl.cpp           # stb_image implementation unit (HDR + LDR)
 ├─ third_party/
 │  ├─ tinyexr.h                    # Single-header OpenEXR (MIT)
 │  ├─ fast_obj.h                   # Single-header OBJ loader (MIT)
-│  └─ nlohmann/                    # JSON for Modern C++ (MIT)
-├─ world.json                      # Example forge config with DR ranges
+│  ├─ nlohmann/                    # JSON for Modern C++ (MIT)
+│  └─ stb_image.h                  # Single-header image loader (MIT/public domain)
+├─ world.json                      # Example forge config with DR ranges + asset library
 ├─ test_cube.obj                   # Minimal test geometry
 ├─ CMakeLists.txt
 ├─ LICENSE                         # BSD-3-Clause
@@ -104,28 +114,81 @@ The `forge` subcommand generates labeled training data at scale with full domain
 
 ### Domain randomization parameters (`world.json`)
 
+Minimal example using the new asset library and optional HDR sky:
+
 ```json
 {
-  "render": { "width": 320, "height": 180, "spp": 4, "max_depth": 6, "seed": 123 },
+  "render": {
+    "width": 320,
+    "height": 180,
+    "spp": 4,
+    "max_depth": 6,
+    "seed": 123
+  },
   "camera": {
-    "lookfrom": { "min": [14, 7, 20], "max": [20, 10, 28] },
-    "fov_deg": { "min": 30, "max": 40 }
+    "lookat": [0.0, 1.2, 0.0],
+    "up": [0.0, 1.0, 0.0],
+    "lookfrom": {
+      "min": [14.0, 7.0, 20.0],
+      "max": [20.0, 10.0, 28.0]
+    },
+    "fov_deg": { "min": 30.0, "max": 40.0 }
   },
   "lighting": {
-    "sun_azimuth_deg": { "min": 220, "max": 320 },
-    "sun_elevation_deg": { "min": 8, "max": 28 }
+    "sun_azimuth_deg": { "min": 220.0, "max": 320.0 },
+    "sun_elevation_deg": { "min": 8.0, "max": 28.0 }
   },
-  "asset": {
-    "obj": "test_cube.obj", "scale": 1.5,
-    "roughness": { "min": 0.05, "max": 0.9 },
-    "metallic": { "min": 0.0, "max": 1.0 }
+  "terrain": {
+    "amp": 1.8,
+    "scale": 0.14,
+    "nx": 64,
+    "nz": 64,
+    "bounds": {
+      "xmin": -22.0,
+      "xmax": 22.0,
+      "zmin": -22.0,
+      "zmax": 22.0
+    }
   },
+  "assets": [
+    {
+      "name": "rock_01",
+      "path": "models/rock.obj",
+      "weight": 0.8,
+      "scale": 1.0,
+      "color": "sand",
+      "label": "rock",
+      "class_id": 2,
+      "y_offset": 0.0,
+      "roughness": { "min": 0.3, "max": 0.8 },
+      "metallic": { "min": 0.0, "max": 0.2 }
+    },
+    {
+      "name": "rover",
+      "path": "models/sirius.obj",
+      "weight": 0.2,
+      "scale": 1.4,
+      "color": "white",
+      "label": "rover",
+      "class_id": 3,
+      "y_offset": 0.15,
+      "roughness": { "min": 0.05, "max": 0.5 },
+      "metallic": { "min": 0.2, "max": 1.0 }
+    }
+  ],
   "placement": {
-    "x": { "min": -12, "max": 12 },
-    "z": { "min": -12, "max": 12 },
-    "yaw_deg": { "min": 0, "max": 360 }
+    "x": { "min": -12.0, "max": 12.0 },
+    "z": { "min": -12.0, "max": 12.0 },
+    "yaw_deg": { "min": 0.0, "max": 360.0 }
   },
-  "dataset": { "root": "dataset", "train_split": 0.8 }
+  "dataset": {
+    "root": "dataset",
+    "train_split": 0.8
+  },
+  "hdr": {
+    "path": "mars.hdr",
+    "intensity": 1.0
+  }
 }
 ```
 
@@ -257,6 +320,38 @@ The default path renders a single scene with labeled cubes and optional OBJ mesh
 ### Color syntax
 
 Colors can be: names (`red`, `blue`, `white`, `sand`, `yellow`, `magenta`, `cyan`, `gray`), hex (`#ffaa00`), or RGB triples (`0.1,0.2,0.9`). Separate multiple entries with commas; use semicolons when mixing with raw RGB (`"red;#3cb371;0.1,0.2,0.9"`).
+
+---
+
+## Forge CLI (Bun-style overrides)
+
+Forge has a focused CLI that layers on top of `world.json`. JSON provides the defaults; **CLI flags always win**, similar to Bun:
+
+```bash
+./build/visionforge forge --config world.json --frames 100 \
+  --width 640 --height 360 --spp 128 \
+  --hdr mars.hdr --hdr-intensity 1.5 \
+  --ground-tex sand.png --ground-scale 3.0 \
+  --verbose
+```
+
+| Flag | Description |
+|------|-------------|
+| `--config` | Path to `world.json` |
+| `--frames` | Number of frames to render |
+| `--width`, `--height` | Override `render.width` / `render.height` |
+| `--spp` | Override `render.spp` (samples per pixel) |
+| `--hdr` | Override `hdr.path` (HDR environment map, equirectangular) |
+| `--hdr-intensity` | Override `hdr.intensity` |
+| `--ground-tex` | Override triplanar ground texture path |
+| `--ground-scale` | Override triplanar UV scale |
+| `--verbose` | Print per-frame grounding logs (asset label, snap-Y, normal, sink) |
+
+Every forged frame:
+
+- Uses **semantic grounding** (heightfield raycast, slope-aligned up vector, and randomized “sink” depth) for whichever asset is sampled.
+- Draws terrain with either the analytic sand material or the triplanar ground texture.
+- Uses the analytic sky or an HDR environment, depending on `hdr` / `--hdr`.
 
 ---
 

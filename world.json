@@ -40,22 +40,26 @@
       "zmax": 22.0
     }
   },
-  "asset": {
-    "obj": "test_cube.obj",
-    "scale": 1.5,
-    "color": "white",
-    "label": "test_cube",
-    "class_id": 2,
-    "y_offset": 0.75,
-    "roughness": {
-      "min": 0.05,
-      "max": 0.9
-    },
-    "metallic": {
-      "min": 0.0,
-      "max": 1.0
+  "assets": [
+    {
+      "name": "test_cube",
+      "path": "test_cube.obj",
+      "weight": 1.0,
+      "scale": 1.5,
+      "color": "white",
+      "label": "test_cube",
+      "class_id": 2,
+      "y_offset": 0.75,
+      "roughness": {
+        "min": 0.05,
+        "max": 0.9
+      },
+      "metallic": {
+        "min": 0.0,
+        "max": 1.0
+      }
     }
-  },
+  ],
   "placement": {
     "x": {
       "min": -12.0,
