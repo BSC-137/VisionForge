@@ -44,6 +44,8 @@
 #include "visionforge/png_writer.hpp"
 #include "visionforge/world_config.hpp"
 #include "visionforge/pbr_material.hpp"
+#include "visionforge/terrain.hpp"
+#include "visionforge/placement.hpp"
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <mutex>
@@ -212,6 +214,7 @@ struct Opts {
     Vec3 obj_pos = Vec3(0, 0, 0);
     double obj_scale = 1.0;
     std::string obj_color = "white";
+    double obj_sink = 0.05;
 
     // EXR / depth export
     bool write_exr  = false;
@@ -241,7 +244,7 @@ Usage:
               [--light-color "r,g,b|#hex|name"] [--light-intensity I]
               [--show-light true|false] [--match-sky true|false]
               [--obj PATH] [--obj-pos "x,y,z"] [--obj-scale S]
-              [--obj-color "name|#hex|r,g,b"]
+              [--obj-color "name|#hex|r,g,b"] [--sink D]
               [--exr] [--depth-only]
               [--help]
 
@@ -308,6 +311,7 @@ static Opts parse(int argc, char** argv) {
         else if (a=="--obj-pos")        { Vec3 v; if(!parse_vec3_csv(argv[need(i)],v)){ std::cerr<<"Bad --obj-pos\n"; std::exit(2);} o.obj_pos=v; }
         else if (a=="--obj-scale")       o.obj_scale = std::stod(argv[need(i)]);
         else if (a=="--obj-color")       o.obj_color = argv[need(i)];
+        else if (a=="--sink")            o.obj_sink = std::stod(argv[need(i)]);
 
         else if (a=="--exr")             o.write_exr = true;
         else if (a=="--depth-only")    { o.depth_only = true; o.write_exr = true; }
@@ -319,96 +323,8 @@ static Opts parse(int argc, char** argv) {
     return o;
 }
 
-// ---------------------------- Procedural terrain ----------------------------
-struct HeightField {
-    double xmin,xmax,zmin,zmax; int nx,nz; double amp,scale; vf::perlin noise;
-    std::vector<double> h;
-    HeightField(double X0,double X1,double Z0,double Z1,int NX,int NZ,double A,double S,uint32_t seed=1337)
-    : xmin(X0),xmax(X1),zmin(Z0),zmax(Z1),nx(NX),nz(NZ),amp(A),scale(S),noise(seed),h((NX+1)*(NZ+1)){}
-    inline int idx(int i,int k) const { return k*(nx+1)+i; }
-
-    void generate(){
-        auto ridged_fbm=[&](const Vec3& p){
-            double a=1.0,f=1.0,s=0.0,nrm=0.0;
-            for(int o=0;o<5;++o){
-                double n = 1.0 - std::fabs(noise.fbm(p*f, 1, 0.5, 2.0));
-                n = 0.85*n + 0.15*n*n;
-                s += a * n; nrm += a; a *= 0.62; f *= 1.9;
-            }
-            return s/std::max(1e-8,nrm);
-        };
-        auto warp=[&](const Vec3& p){
-            return p + 0.35*Vec3(
-                noise.fbm(p*1.7,3,0.5,2.1),
-                noise.fbm(p*2.0,3,0.5,2.0),
-                noise.fbm(p*1.8,3,0.5,2.2));
-        };
-        for (int k=0;k<=nz;++k){
-            double z=zmin+(zmax-zmin)*(double(k)/nz);
-            for (int i=0;i<=nx;++i){
-                double x=xmin+(xmax-xmin)*(double(i)/nx);
-                Vec3 pd=warp(Vec3(x*scale,0.0,z*scale));
-                double dunes = ridged_fbm(pd);
-                double mid   = 0.25 * noise.fbm(pd*2.4,4,0.5,2.0);
-                double fine  = 0.06 * noise.fbm(pd*10.0,3,0.5,2.0);
-                h[idx(i,k)]  = amp * ((1.1*dunes - 0.55) + mid + fine);
-            }
-        }
-    }
-    double height_at(double x,double z) const {
-        double u=(x-xmin)/(xmax-xmin), v=(z-zmin)/(zmax-zmin);
-        u=std::clamp(u,0.0,1.0); v=std::clamp(v,0.0,1.0);
-        double fx=u*nx, fz=v*nz; int i=std::clamp((int)std::floor(fx),0,nx-1);
-        int k=std::clamp((int)std::floor(fz),0,nz-1); double du=fx-i, dv=fz-k;
-        auto H=[&](int ii,int kk){ return h[idx(ii,kk)]; };
-        double h00=H(i,k), h10=H(i+1,k), h01=H(i,k+1), h11=H(i+1,k+1);
-        double h0=h00*(1-du)+h10*du;
-        double h1=h01*(1-du)+h11*du;
-        return h0*(1-dv)+h1*dv;
-    }
-    Vec3 normal_at(int i,int k) const {
-        auto H=[&](int ii,int kk){ ii=std::clamp(ii,0,nx); kk=std::clamp(kk,0,nz); return h[idx(ii,kk)]; };
-        double hx=(H(i+1,k)-H(i-1,k))*0.5, hz=(H(i,k+1)-H(i,k-1))*0.5;
-        double dx=(xmax-xmin)/nx, dz=(zmax-zmin)/nz;
-        Vec3 tx(dx,hx,0), tz(0,hz,dz); return normalize(cross(tz,tx));
-    }
-    void carve_footprint(double x0, double z0, double edge, double sink, double rim_amp){
-        double r = 0.6 * edge; double r2 = r*r; double r_out = r*1.8;
-        for (int k=0;k<=nz;++k){
-            double z = zmin + (zmax-zmin)*(double(k)/nz);
-            for (int i=0;i<=nx;++i){
-                double x = xmin + (xmax-xmin)*(double(i)/nx);
-                double dx=x-x0, dz=z-z0; double d2=dx*dx+dz*dz; if (d2 > r_out*r_out) continue;
-                double depress = sink * std::exp(-(d2)/(2.0*r2));
-                double ring = std::exp(-std::pow((std::sqrt(d2)/r - 1.1)/0.18, 2.0));
-                double berm = rim_amp * ring;
-                h[idx(i,k)] -= depress;
-                h[idx(i,k)] += berm;
-            }
-        }
-    }
-    void to_triangles(HittableList& out, const std::shared_ptr<Material>& m) const {
-        for(int k=0;k<nz;++k){
-            double z0=zmin+(zmax-zmin)*(double(k)/nz);
-            double z1=z0 + (zmax-zmin)/nz;
-            for(int i=0;i<nx;++i){
-                double x0=xmin+(xmax-xmin)*(double(i)/nx);
-                double x1=x0 + (xmax-xmin)/nx;
-                Vec3 v00(x0,h[idx(i  ,k  )],z0), v10(x1,h[idx(i+1,k  )],z0);
-                Vec3 v01(x0,h[idx(i  ,k+1)],z1), v11(x1,h[idx(i+1,k+1)],z1);
-                Vec3 n00=normal_at(i  ,k  ), n10=normal_at(i+1,k  ),
-                     n01=normal_at(i  ,k+1), n11=normal_at(i+1,k+1);
-                if (((i^k)&1)==0){
-                    out.add(std::make_shared<Triangle>(v00,v10,v11,n00,n10,n11,m));
-                    out.add(std::make_shared<Triangle>(v00,v11,v01,n00,n11,n01,m));
-                } else {
-                    out.add(std::make_shared<Triangle>(v00,v10,v01,n00,n10,n01,m));
-                    out.add(std::make_shared<Triangle>(v10,v11,v01,n10,n11,n01,m));
-                }
-            }
-        }
-    }
-};
+// HeightField is now in include/visionforge/terrain.hpp
+// SlopeAlign + snap_y are in include/visionforge/placement.hpp
 
 // ---------------------------- Globals that need CLI control ----------------------------
 static vf::perlin g_bump(424242);
@@ -1034,6 +950,7 @@ static int run_forge_subcommand(int argc, char** argv) {
     }
 
     std::mt19937 dr_rng(cfg.render.seed ^ 0x9e3779b1u);
+    std::uniform_real_distribution<double> sink_rng(0.02, 0.10);
     int train_count = static_cast<int>(std::round(cli.frames * cfg.dataset.train_split));
 
     const double aspect = double(o.width) / double(o.height);
@@ -1042,7 +959,8 @@ static int run_forge_subcommand(int argc, char** argv) {
     GBuffer gbuf(o.width, o.height);
 
     auto rotate_node = std::make_shared<RotateY>(base_mesh, 0.0);
-    auto translate_node = std::make_shared<Translate>(rotate_node, Vec3(0, 0, 0));
+    auto slope_node = std::make_shared<SlopeAlign>(rotate_node, Vec3(0, 1, 0));
+    auto translate_node = std::make_shared<Translate>(slope_node, Vec3(0, 0, 0));
     ObjectInfo obj_info{1u, cfg.asset.class_id, cfg.asset.label.c_str()};
     auto tag_node = std::make_shared<Tag>(translate_node, obj_info);
 
@@ -1060,7 +978,7 @@ static int run_forge_subcommand(int argc, char** argv) {
         double obj_x = sample_range(dr_rng, cfg.placement.x);
         double obj_z = sample_range(dr_rng, cfg.placement.z);
         double obj_yaw = sample_range(dr_rng, cfg.placement.yaw_deg);
-        double obj_y = hf.height_at(obj_x, obj_z) + cfg.asset.y_offset;
+        auto terrain_sample = hf.get_terrain_height_and_normal(obj_x, obj_z);
         double obj_roughness = sample_range(dr_rng, cfg.asset.roughness);
         double obj_metallic = sample_range(dr_rng, cfg.asset.metallic);
         obj_mat->set_parameters(obj_col, obj_roughness, obj_metallic);
@@ -1069,6 +987,11 @@ static int run_forge_subcommand(int argc, char** argv) {
         g_sky.set_turbidity(o.turbidity);
 
         *rotate_node = RotateY(base_mesh, obj_yaw);
+        slope_node->set_from_normal(terrain_sample.normal);
+        AABB obj_aabb;
+        slope_node->bounding_box(obj_aabb);
+        double frame_sink = sink_rng(dr_rng);
+        double obj_y = snap_y(terrain_sample.height, obj_aabb.max().y - obj_aabb.min().y, frame_sink) + cfg.asset.y_offset;
         translate_node->offset = Vec3(obj_x, obj_y, obj_z);
 
         frame_world.objects.clear();
@@ -1182,14 +1105,6 @@ int main(int argc, char** argv) {
     const int max_depth  = PREVIEW ? MAX_DEPTH_PREVIEW : MAX_DEPTH_FINAL;
     const double aspect  = double(width)/double(height);
 
-    // camera
-    Vec3 lookfrom = o.lookfrom;
-    Vec3 lookat   = o.lookat;
-    double vfov_deg = o.fov_deg;
-    double focus_dist = (lookfrom - lookat).length();
-    Camera cam(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect, 0.0, focus_dist, 0.0, 1.0);
-    CameraBasis camBasis = make_camera_basis(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect);
-
     // sky (CLI)
     g_sky.set_angles(o.sun_az_deg, o.sun_el_deg); // requires small setter; see notes below
     g_sky.set_turbidity(o.turbidity);
@@ -1208,6 +1123,18 @@ int main(int argc, char** argv) {
     // terrain
     HeightField hf(o.XMIN, o.XMAX, o.ZMIN, o.ZMAX, o.terrain_nx, o.terrain_nz, o.terrain_amp, o.terrain_scale, /*seed*/1337);
     hf.generate();
+
+    // camera — ensure lookfrom is safely above terrain
+    Vec3 lookfrom = o.lookfrom;
+    Vec3 lookat   = o.lookat;
+    double vfov_deg = o.fov_deg;
+    {
+        double cam_ground = hf.height_at(lookfrom.x, lookfrom.z);
+        double cam_min_y  = cam_ground + o.terrain_amp + 2.0;
+        if (lookfrom.y < cam_min_y) lookfrom.y = cam_min_y;
+    }
+    double focus_dist = (lookfrom - lookat).length();
+    Camera cam(lookfrom, lookat, Vec3(0,1,0), vfov_deg, aspect, 0.0, focus_dist, 0.0, 1.0);
 
     HittableList objects;
 
@@ -1258,12 +1185,11 @@ int main(int argc, char** argv) {
     for (auto& c : cube_colors) cube_mats.push_back(std::make_shared<PBRMaterial>(c, 0.65, 0.0));
 
     // cube placement
-    struct CubePose { Vec3 c; double edge; double roll; double pitch; int color_idx; std::string label; };
+    struct CubePose { Vec3 c; double edge; double roll; double pitch; int color_idx; std::string label; Vec3 terrain_normal; };
     std::vector<CubePose> cubes; cubes.reserve(o.cubes);
     std::mt19937 rng(o.seed ^ 0x9e3779b1);
     std::uniform_real_distribution<double> edge_rng(o.cube_edge_min, o.cube_edge_max);
     std::uniform_real_distribution<double> tilt_rng(-o.cube_tilt_abs, o.cube_tilt_abs);
-    std::uniform_real_distribution<double> sink_ratio_rng(0.08, 0.22);
 
     auto place_grid = [&](){
         int n = (int)std::ceil(std::sqrt((double)o.cubes));
@@ -1275,12 +1201,10 @@ int main(int argc, char** argv) {
                 double x = o.XMIN + (gx+1)*dx;
                 double z = o.ZMIN + (gz+1)*dz;
                 double e = edge_rng(rng);
-                double y_ground = hf.height_at(x,z);
-                double sink_ratio = sink_ratio_rng(rng);
-                double y = y_ground + (1.0 - sink_ratio) * (e*0.5);
-                hf.carve_footprint(x, z, e, sink_ratio * e, 0.10 * e);
+                auto sample = hf.get_terrain_height_and_normal(x, z);
+                hf.carve_footprint(x, z, e, 0.0, 0.10 * e);
                 int ci = count % (int)cube_mats.size();
-                cubes.push_back({Vec3(x,y,z), e, tilt_rng(rng), tilt_rng(rng), ci, color_labels[ci]});
+                cubes.push_back({Vec3(x, sample.height, z), e, tilt_rng(rng), tilt_rng(rng), ci, color_labels[ci], sample.normal});
                 ++count;
             }
         }
@@ -1300,12 +1224,10 @@ int main(int argc, char** argv) {
             double x=xr(rng), z=zr(rng);
             if (!far_enough(x,z)){ ++tries; continue; }
             double e = edge_rng(rng);
-            double y_ground = hf.height_at(x,z);
-            double sink_ratio = sink_ratio_rng(rng);
-            double y = y_ground + (1.0 - sink_ratio) * (e*0.5);
-            hf.carve_footprint(x, z, e, sink_ratio * e, 0.10 * e);
+            auto sample = hf.get_terrain_height_and_normal(x, z);
+            hf.carve_footprint(x, z, e, 0.0, 0.10 * e);
             int ci = (int)cubes.size() % (int)cube_mats.size();
-            cubes.push_back({Vec3(x,y,z), e, tilt_rng(rng), tilt_rng(rng), ci, color_labels[ci]});
+            cubes.push_back({Vec3(x, sample.height, z), e, tilt_rng(rng), tilt_rng(rng), ci, color_labels[ci], sample.normal});
         }
         if ((int)cubes.size() < o.cubes) {
             std::cerr<<"Warning: random placement hit try limit; placed "<<cubes.size()<<"/"<<o.cubes<<"\n";
@@ -1325,35 +1247,57 @@ int main(int argc, char** argv) {
         auto cube = make_unit_cube(Vec3(0,0,0), cp.edge, mat);
         std::shared_ptr<Hittable> tilted = std::make_shared<RotateZ>(cube, cp.roll);
         tilted = std::make_shared<RotateX>(tilted, cp.pitch);
-        tilted = std::make_shared<Translate>(tilted, cp.c);
+        auto aligned = std::make_shared<SlopeAlign>(tilted, cp.terrain_normal);
+
+        AABB aabb;
+        aligned->bounding_box(aabb);
+        cp.c.y = snap_y(cp.c.y, aabb.max().y - aabb.min().y);
+
+        auto positioned = std::make_shared<Translate>(aligned, cp.c);
 
         uint32_t id = next_instance_id++;
         std::string label = cp.label.empty()? "cube" : cp.label;
         ObjectInfo info{ id, /*class_id=*/1u, label.c_str() };
-        auto tagged = std::make_shared<Tag>(tilted, info);
+        auto tagged = std::make_shared<Tag>(positioned, info);
         objects.add(tagged);
 
         reg.id_to_label[id] = label;
         reg.id_to_class[id] = 1u;
     }
 
-    // OBJ mesh loading
+    // OBJ mesh loading — snap to terrain + slope alignment + sim-to-real sink
     if (!o.obj_path.empty()) {
         bool color_ok = true;
         std::string obj_label;
         Vec3 obj_col = parse_color_one(o.obj_color, color_ok, obj_label);
         auto obj_mat = std::make_shared<PBRMaterial>(obj_col, 0.5, 0.0);
 
-        auto mesh = Mesh::from_obj(o.obj_path, obj_mat, o.obj_pos, o.obj_scale);
+        auto mesh = Mesh::from_obj(o.obj_path, obj_mat, Vec3(0,0,0), o.obj_scale);
         if (mesh) {
-            uint32_t id = next_instance_id++;
+            auto sample = hf.get_terrain_height_and_normal(o.obj_pos.x, o.obj_pos.z);
+            auto aligned = std::make_shared<SlopeAlign>(mesh, sample.normal);
+
+            AABB aabb;
+            aligned->bounding_box(aabb);
+            double obj_y = snap_y(sample.height, aabb.max().y - aabb.min().y, o.obj_sink);
+            auto positioned = std::make_shared<Translate>(aligned, Vec3(o.obj_pos.x, obj_y, o.obj_pos.z));
+
+            std::fprintf(stderr,
+                "[GROUNDING] Pos: (%.2f, %.2f) | Terrain H: %.2f | Snap-Y: %.2f"
+                " | Normal: (%.2f, %.2f, %.2f) | Sink: %.2f\n",
+                o.obj_pos.x, o.obj_pos.z,
+                sample.height, obj_y,
+                sample.normal.x, sample.normal.y, sample.normal.z,
+                o.obj_sink);
+
+            constexpr uint32_t OBJ_INSTANCE_ID = 100;
             if (obj_label.empty()) obj_label = "mesh";
-            ObjectInfo info{ id, /*class_id=*/2u, obj_label.c_str() };
-            auto tagged = std::make_shared<Tag>(mesh, info);
+            ObjectInfo info{ OBJ_INSTANCE_ID, /*class_id=*/2u, obj_label.c_str() };
+            auto tagged = std::make_shared<Tag>(positioned, info);
             objects.add(tagged);
 
-            reg.id_to_label[id] = obj_label;
-            reg.id_to_class[id] = 2u;
+            reg.id_to_label[OBJ_INSTANCE_ID] = obj_label;
+            reg.id_to_class[OBJ_INSTANCE_ID] = 2u;
         }
     }
 
@@ -1462,22 +1406,15 @@ int main(int argc, char** argv) {
                          o.out.substr(o.out.size()-4) == ".png"));
 
     if (single_file) {
+        if (o.write_bbox_overlay && !o.depth_only) {
+            auto sf_boxes = boxes_from_mask(gbuf, reg);
+            for (auto& b : sf_boxes)
+                draw_rect(fb, width, height, b.x0, b.y0, b.x1, b.y1);
+        }
         bool is_png = o.out.substr(o.out.size()-4) == ".png";
         if (is_png) {
-            if (o.write_bbox_overlay && !o.depth_only) {
-                for (auto& pose : cubes) {
-                    Box2D b = cube_bbox_screen_rot(camBasis, {pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
-                    if (b.valid) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
-                }
-            }
             vf::write_png_rgb8(o.out.c_str(), width, height, fb.data());
         } else {
-            if (o.write_bbox_overlay && !o.depth_only) {
-                for (auto& pose : cubes) {
-                    Box2D b = cube_bbox_screen_rot(camBasis, {pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
-                    if (b.valid) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
-                }
-            }
             FILE* fp = std::fopen(o.out.c_str(), "wb");
             if (fp) {
                 std::fprintf(fp, "P6\n%d %d\n255\n", width, height);
@@ -1492,12 +1429,12 @@ int main(int argc, char** argv) {
     // ---- Directory output mode: full forge-style labels ----
     std::filesystem::create_directories(o.out);
 
+    std::vector<DetectedBox> tight;
     if (!o.depth_only) {
+        tight = boxes_from_mask(gbuf, reg);
         if (o.write_bbox_overlay) {
-            for (auto& pose : cubes) {
-                Box2D b = cube_bbox_screen_rot(camBasis, {pose.c, pose.edge, pose.roll, pose.pitch, pose.label.c_str()}, width, height);
-                if (b.valid) draw_rect(fb, width, height, b.x0,b.y0,b.x1,b.y1);
-            }
+            for (auto& b : tight)
+                draw_rect(fb, width, height, b.x0, b.y0, b.x1, b.y1);
         }
     }
 
@@ -1519,7 +1456,6 @@ int main(int argc, char** argv) {
     }
 
     if (!o.depth_only) {
-        auto tight = boxes_from_mask(gbuf, reg);
 
         // inst.pgm (reuse the same gbuf scan we already have)
         {
