@@ -6,7 +6,9 @@ bin/
 # Render & dataset outputs
 out/
 dataset/
+examples/
 benchmark_dataset/
+test_models/
 *.ppm
 *.pgm
 *.exr
