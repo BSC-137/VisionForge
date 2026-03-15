@@ -43,6 +43,7 @@
 #include "visionforge/exr_writer.hpp"
 #include "visionforge/png_writer.hpp"
 #include "visionforge/world_config.hpp"
+#include "visionforge/scene_graph.hpp"
 #include "visionforge/pbr_material.hpp"
 #include "visionforge/terrain.hpp"
 #include "visionforge/placement.hpp"
@@ -599,6 +600,9 @@ struct ForgeCli {
     std::string ground_tex = "";
     double ground_scale = -1.0;
     bool verbose = false;
+
+    // Scenario name
+    std::string scenario_name = "";
 };
 
 static void print_forge_usage() {
@@ -641,6 +645,47 @@ static ForgeCli parse_forge_cli(int argc, char** argv) {
     }
     return cli;
 }
+
+static void print_scenario_usage() {
+    std::cout <<
+R"(VisionForge Scenario — deterministic synthetic generation
+
+Usage:
+  visionforge scenario --config world.json --name "MyScenario" --frames 100
+)";
+}
+
+static ForgeCli parse_scenario_cli(int argc, char** argv) {
+    ForgeCli cli;
+    for (int i = 2; i < argc; ++i) {
+        std::string a(argv[i]);
+        if (a == "--config" && i + 1 < argc) cli.config_path = argv[++i];
+        else if (a == "--name" && i + 1 < argc) cli.scenario_name = argv[++i];
+        else if (a == "--frames" && i + 1 < argc) cli.frames = std::stoi(argv[++i]);
+        else if (a == "--width" && i + 1 < argc)  cli.width  = std::stoi(argv[++i]);
+        else if (a == "--height" && i + 1 < argc) cli.height = std::stoi(argv[++i]);
+        else if (a == "--spp" && i + 1 < argc)    cli.spp    = std::stoi(argv[++i]);
+        else if (a == "--hdr" && i + 1 < argc) cli.hdr_path = argv[++i];
+        else if (a == "--hdr-intensity" && i + 1 < argc) cli.hdr_intensity = std::stod(argv[++i]);
+        else if (a == "--ground-tex" && i + 1 < argc) cli.ground_tex = argv[++i];
+        else if (a == "--ground-scale" && i + 1 < argc) cli.ground_scale = std::stod(argv[++i]);
+        else if (a == "--verbose") cli.verbose = true;
+        else if (a == "--help" || a == "-h") {
+            print_scenario_usage();
+            std::exit(0);
+        } else {
+            std::cerr << "Unknown scenario flag: " << a << "\n";
+            print_scenario_usage();
+            std::exit(2);
+        }
+    }
+    if (cli.config_path.empty() || cli.scenario_name.empty() || cli.frames <= 0) {
+        print_scenario_usage();
+        std::exit(2);
+    }
+    return cli;
+}
+
 
 static inline double sample_range(std::mt19937& rng, const ScalarRange& r) {
     std::uniform_real_distribution<double> d(r.min, r.max);
@@ -758,6 +803,14 @@ static int render_frame(const Opts& o,
 
 // ---- Async I/O pipeline for forge ----
 
+struct FrameObject {
+    uint32_t instance_id;
+    uint32_t class_id;
+    std::string label;
+    double x, y, z, yaw;
+    double roughness, metallic;
+};
+
 struct ForgeFrameData {
     int frame_id;
     int width, height;
@@ -773,42 +826,48 @@ struct ForgeFrameData {
     Vec3 lookat, up;
     double fov;
     double sun_az, sun_el;
-    double obj_x, obj_y, obj_z, obj_yaw;
-    double obj_roughness, obj_metallic;
-    uint32_t class_id;
-    std::string label;
+
+    std::vector<FrameObject> objects;
+
     int spp_target, max_depth;
     unsigned seed;
 };
 
 static void write_meta_fast(const std::string& path, const ForgeFrameData& f) {
-    char buf[4096];
-    const double yaw_rad = f.obj_yaw * PI / 180.0;
-    const double c = std::cos(yaw_rad), s = std::sin(yaw_rad);
-    int n = std::snprintf(buf, sizeof(buf),
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if (!fp) return;
+
+    std::fprintf(fp,
 R"({"frame_id":%d,"split":"%s","image_width":%d,"image_height":%d,)"
 R"("render":{"spp_target":%d,"spp_avg":%d,"max_depth":%d,"seed":%u},)"
 R"("camera":{"lookfrom":[%.8g,%.8g,%.8g],"lookat":[%.8g,%.8g,%.8g],)"
 R"("up":[%.8g,%.8g,%.8g],"fov_deg":%.8g},)"
 R"("sun":{"azimuth_deg":%.8g,"elevation_deg":%.8g},)"
-R"("objects":[{"instance_id":1,"class_id":%u,"label":"%s",)"
-R"("position":[%.8g,%.8g,%.8g],"rotation_y_deg":%.8g,)"
-R"("roughness":%.8g,"metallic":%.8g,)"
-R"("local_to_world":[[%.8g,0,%.8g,%.8g],[0,1,0,%.8g],[%.8g,0,%.8g,%.8g],[0,0,0,1]]}]})"
-"\n",
+R"("objects":[)",
         f.frame_id, f.is_train ? "train" : "val", f.width, f.height,
         f.spp_target, f.avg_spp, f.max_depth, f.seed,
         f.lookfrom.x, f.lookfrom.y, f.lookfrom.z,
         f.lookat.x, f.lookat.y, f.lookat.z,
         f.up.x, f.up.y, f.up.z, f.fov,
-        f.sun_az, f.sun_el,
-        f.class_id, f.label.c_str(),
-        f.obj_x, f.obj_y, f.obj_z, f.obj_yaw,
-        f.obj_roughness, f.obj_metallic,
-        c, s, f.obj_x, f.obj_y, -s, c, f.obj_z);
+        f.sun_az, f.sun_el);
 
-    FILE* fp = std::fopen(path.c_str(), "wb");
-    if (fp) { std::fwrite(buf, 1, std::min(n, (int)sizeof(buf) - 1), fp); std::fclose(fp); }
+    for (size_t i = 0; i < f.objects.size(); ++i) {
+        const auto& obj = f.objects[i];
+        const double yaw_rad = obj.yaw * PI / 180.0;
+        const double c = std::cos(yaw_rad), s = std::sin(yaw_rad);
+        std::fprintf(fp,
+R"({"instance_id":%u,"class_id":%u,"label":"%s",)"
+R"("position":[%.8g,%.8g,%.8g],"rotation_y_deg":%.8g,)"
+R"("roughness":%.8g,"metallic":%.8g,)"
+R"("local_to_world":[[%.8g,0,%.8g,%.8g],[0,1,0,%.8g],[%.8g,0,%.8g,%.8g],[0,0,0,1]]}%s)",
+            obj.instance_id, obj.class_id, obj.label.c_str(),
+            obj.x, obj.y, obj.z, obj.yaw,
+            obj.roughness, obj.metallic,
+            c, s, obj.x, obj.y, -s, c, obj.z,
+            (i + 1 < f.objects.size()) ? "," : "");
+    }
+    std::fprintf(fp, "]}\n");
+    std::fclose(fp);
 }
 
 static void write_yolo_fast(const std::string& path, int W, int H,
@@ -897,8 +956,10 @@ private:
         write_meta_fast(meta_path, f);
 
         IdRegistry reg;
-        reg.id_to_label[1] = f.label;
-        reg.id_to_class[1] = f.class_id;
+        for (const auto& obj : f.objects) {
+            reg.id_to_label[obj.instance_id] = obj.label;
+            reg.id_to_class[obj.instance_id] = obj.class_id;
+        }
         auto boxes = boxes_from_mask(f.gbuf, reg);
 
         write_yolo_fast(yolo_path, f.width, f.height, boxes);
@@ -1064,17 +1125,28 @@ static int run_forge_subcommand(int argc, char** argv) {
 
         g_sky.set_angles(sun_az, sun_el);
 
-        // --- Phase 5: Grounding Math ---
-        *asset.rotate_node = RotateY(asset.mesh, obj_yaw);
-        asset.slope_node->set_from_normal(terrain_sample.normal);
+        // --- Phase 5: Grounding Math Using SceneNode ---
+        auto node = std::make_shared<SceneNode>(asset.name);
+        node->object = asset.mesh;
+        node->class_id = asset.config.class_id;
+        node->label = asset.config.label;
+        node->instance_id = 1;
+        node->local_transform.position = Vec3(obj_x, 0, obj_z);
+        node->local_transform.rotation = Vec3(0, obj_yaw, 0); // Yaw maps to Y in rotation convention for flat_pack
+        node->local_transform.scale = Vec3(asset.config.scale, asset.config.scale, asset.config.scale);
+        node->grounding_constraint = true;
         
-        AABB obj_aabb;
-        asset.slope_node->bounding_box(obj_aabb);
         double frame_sink = sink_rng(dr_rng);
+        node->y_offset = asset.config.y_offset - frame_sink;
+
+        node->update_transforms();
+        node->apply_grounding(hf);
         
-        // Gravity Snap + User Offset - Randomized Sink
-        double obj_y = snap_y(terrain_sample.height, obj_aabb.max().y - obj_aabb.min().y, frame_sink) + asset.config.y_offset;
-        asset.translate_node->offset = Vec3(obj_x, obj_y, obj_z);
+        frame_world.objects.clear();
+        frame_world.objects.push_back(static_bvh);
+        node->flat_pack(frame_world);
+
+        double obj_y = node->world_transform.position.y;
 
         // --- Mathematical Verification Log ---
         if (cli.verbose) {
@@ -1088,9 +1160,6 @@ static int run_forge_subcommand(int argc, char** argv) {
                         frame_sink);
         }
 
-        frame_world.objects.clear();
-        frame_world.objects.push_back(static_bvh);
-        frame_world.objects.push_back(asset.tag_node);
 
         const double focus_dist = (lookfrom - cfg.camera.lookat).length();
         Camera cam(lookfrom, cfg.camera.lookat, cfg.camera.up, fov, aspect, 0.0, focus_dist, 0.0, 1.0);
@@ -1115,9 +1184,15 @@ static int run_forge_subcommand(int argc, char** argv) {
         fd.fb = std::move(fb); fd.gbuf = std::move(gbuf);
         fd.lookfrom = lookfrom; fd.lookat = cfg.camera.lookat; fd.up = cfg.camera.up; fd.fov = fov;
         fd.sun_az = sun_az; fd.sun_el = sun_el;
-        fd.obj_x = obj_x; fd.obj_y = obj_y; fd.obj_z = obj_z; fd.obj_yaw = obj_yaw;
-        fd.obj_roughness = obj_roughness; fd.obj_metallic = obj_metallic;
-        fd.class_id = asset.config.class_id; fd.label = asset.config.label;
+
+        FrameObject fo;
+        fo.instance_id = 1;
+        fo.class_id = asset.config.class_id;
+        fo.label = asset.config.label;
+        fo.x = obj_x; fo.y = obj_y; fo.z = obj_z; fo.yaw = obj_yaw;
+        fo.roughness = obj_roughness; fo.metallic = obj_metallic;
+        fd.objects.push_back(fo);
+
         fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
 
         io_worker.push(std::move(fd));
@@ -1138,10 +1213,207 @@ static int run_forge_subcommand(int argc, char** argv) {
     return 0;
 }
 
+static int run_scenario_subcommand(int argc, char** argv) {
+    ForgeCli cli = parse_scenario_cli(argc, argv);
+    WorldConfig cfg = load_world_config(cli.config_path);
+
+    // Apply basic flags as run_forge does
+    if (cli.width  > 0) cfg.render.width  = cli.width;
+    if (cli.height > 0) cfg.render.height = cli.height;
+    if (cli.spp    > 0) cfg.render.spp    = cli.spp;
+    if (!cli.hdr_path.empty()) cfg.hdr_path = cli.hdr_path;
+    if (cli.hdr_intensity > 0) cfg.hdr_intensity = cli.hdr_intensity;
+    if (!cli.ground_tex.empty()) cfg.ground_tex = cli.ground_tex;
+    if (cli.ground_scale > 0) cfg.ground_scale = cli.ground_scale;
+
+    WorldConfig::Scenario* active_scenario = nullptr;
+    for (auto& s : cfg.scenarios) {
+        if (s.name == cli.scenario_name) {
+            active_scenario = &s;
+            break;
+        }
+    }
+    if (!active_scenario) {
+        std::cerr << "Scenario '" << cli.scenario_name << "' not found in config.\n";
+        return 1;
+    }
+
+    std::filesystem::create_directories(cfg.dataset.root);
+    const std::string train_dir = cfg.dataset.root + "/train";
+    const std::string val_dir = cfg.dataset.root + "/val";
+    std::filesystem::create_directories(train_dir);
+    std::filesystem::create_directories(val_dir);
+
+    Opts o;
+    o.width         = cfg.render.width;
+    o.height        = cfg.render.height;
+    o.spp           = cfg.render.spp;
+    o.max_depth     = cfg.render.max_depth;
+    o.exposure_comp = cfg.render.exposure;
+    o.sky_gain      = cfg.render.sky_gain;
+    o.preview       = cfg.render.preview;
+    o.seed          = cfg.render.seed;
+    o.write_exr     = true;
+    o.min_spp          = 8;
+    o.rel_noise_target = 0.1;
+    o.light_samples_final = 1;
+
+    // Load resources
+    if (!cfg.hdr_path.empty()) {
+        g_hdr_sky = std::make_shared<HDRSky>();
+        if (!g_hdr_sky->load(cfg.hdr_path, cfg.hdr_intensity)) g_hdr_sky.reset();
+    }
+    if (!cfg.ground_tex.empty()) {
+        auto img = std::make_shared<ImageTexture>();
+        if (img->load(cfg.ground_tex)) g_terrain_mat = std::make_shared<TriplanarMaterial>(img, cfg.ground_scale);
+    }
+
+    sand_ptr = std::make_shared<Lambertian>(Vec3(0.78, 0.72, 0.58));
+    HeightField hf(cfg.terrain.xmin, cfg.terrain.xmax, cfg.terrain.zmin, cfg.terrain.zmax,
+                   cfg.terrain.nx, cfg.terrain.nz, cfg.terrain.amp, cfg.terrain.scale, cfg.render.seed);
+    hf.generate();
+
+    HittableList static_world;
+    auto sun_em = std::make_shared<DiffuseLight>(o.light_color, o.light_intensity);
+    auto rect_light = std::make_shared<YZRect>(o.light_y0, o.light_y1, o.light_z0, o.light_z1, o.light_x, sun_em);
+    static_world.add(rect_light);
+    hf.to_triangles(static_world, g_terrain_mat ? g_terrain_mat : sand_ptr);
+    
+    std::vector<std::shared_ptr<Hittable>> static_objs = static_world.objects;
+    auto static_bvh = std::make_shared<BVHNode>(static_objs, 0, static_objs.size());
+
+    AssetManager asset_mgr;
+    if (!asset_mgr.load_all(cfg.assets, parse_color_one)) return 2;
+
+    std::mt19937 dr_rng(cfg.render.seed ^ 0xabcdef12u);
+    int train_count = static_cast<int>(std::round(cli.frames * cfg.dataset.train_split));
+
+    const double aspect = double(o.width) / double(o.height);
+    std::vector<unsigned char> fb;
+    fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
+    GBuffer gbuf(o.width, o.height);
+    HittableList frame_world;
+    ForgeIOWorker io_worker;
+    double total_render_ms = 0.0;
+    
+    // Scene node builder
+    std::function<std::shared_ptr<SceneNode>(const WorldConfig::NodeEntry&)> build_node;
+    build_node = [&](const WorldConfig::NodeEntry& entry) -> std::shared_ptr<SceneNode> {
+        auto n = std::make_shared<SceneNode>(entry.name);
+        n->local_transform.position = entry.position;
+        n->local_transform.rotation = entry.rotation;
+        n->local_transform.scale = entry.scale;
+        n->grounding_constraint = entry.grounding_constraint;
+        n->y_offset = entry.y_offset;
+        if (!entry.asset.empty()) {
+            LoadedAsset* loaded = asset_mgr.find_by_name(entry.asset);
+            if (loaded) {
+                n->object = loaded->mesh;
+                n->class_id = loaded->config.class_id;
+                n->label = loaded->config.label;
+            }
+        }
+        for (const auto& c : entry.children) n->add_child(build_node(c));
+        return n;
+    };
+
+    auto root_node = std::make_shared<SceneNode>("root");
+    for (const auto& ne : active_scenario->root_nodes) {
+        root_node->add_child(build_node(ne));
+    }
+
+    for (int frame = 0; frame < cli.frames; ++frame) {
+        double sun_az = sample_range(dr_rng, cfg.lighting.sun_azimuth_deg);
+        double sun_el = sample_range(dr_rng, cfg.lighting.sun_elevation_deg);
+        g_sky.set_angles(sun_az, sun_el);
+
+        for (size_t i=0; i<asset_mgr.size(); ++i) {
+            auto& asset = asset_mgr[i];
+            double dr_r = sample_range(dr_rng, asset.config.roughness);
+            double dr_m = sample_range(dr_rng, asset.config.metallic);
+            asset.material->set_parameters(asset.material->base_color, dr_r, dr_m);
+        }
+
+        root_node->update_transforms();
+        root_node->apply_grounding(hf);
+        
+        frame_world.objects.clear();
+        frame_world.objects.push_back(static_bvh);
+        
+        uint32_t inst_counter = 1;
+        std::vector<FrameObject> frame_objs;
+        std::function<void(std::shared_ptr<SceneNode>)> prep_for_frame = [&](std::shared_ptr<SceneNode> n) {
+            if (n->object) {
+                n->instance_id = inst_counter++;
+                FrameObject fo;
+                fo.instance_id = n->instance_id;
+                fo.class_id = n->class_id;
+                fo.label = n->label;
+                fo.x = n->world_transform.position.x;
+                fo.z = n->world_transform.position.z;
+                fo.yaw = n->world_transform.rotation.y;
+                fo.y = n->world_transform.position.y;
+                
+                double rough = 0.5, metal = 0.0;
+                if (!n->label.empty() || !n->name.empty()) {
+                    auto* la = asset_mgr.find_by_name(n->label.empty() ? n->name : n->label);
+                    if (la) {
+                        rough = la->material->roughness;
+                        metal = la->material->metallic;
+                    }
+                }
+                fo.roughness = rough;
+                fo.metallic = metal;
+                frame_objs.push_back(fo);
+            }
+            for (auto c : n->children) prep_for_frame(c);
+        };
+        prep_for_frame(root_node);
+
+        root_node->flat_pack(frame_world);
+
+        const double focus_dist = (active_scenario->camera.lookfrom.max - active_scenario->camera.lookat).length();
+        Vec3 lf = active_scenario->camera.lookfrom.max;
+        double c_fov = active_scenario->camera.fov_deg.max;
+        Camera cam(lf, active_scenario->camera.lookat, active_scenario->camera.up, c_fov, aspect, 0.0, focus_dist, 0.0, 1.0);
+
+        vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(frame));
+        gbuf.clear();
+        auto t0 = std::chrono::high_resolution_clock::now();
+        int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, true);
+        double render_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        total_render_ms += render_ms;
+        if (cli.verbose) std::cout << "Scenario Frame " << (frame + 1) << "/" << cli.frames << " " << (int)render_ms << "ms\n";
+
+        const bool is_train = (frame < train_count);
+        char stem_buf[32]; std::snprintf(stem_buf, sizeof(stem_buf), "sfrm_%04d", frame);
+        
+        ForgeFrameData fd;
+        fd.frame_id = frame; fd.width = o.width; fd.height = o.height;
+        fd.avg_spp = avg_spp; fd.is_train = is_train; fd.split_dir = is_train ? train_dir : val_dir; fd.stem = stem_buf;
+        fd.fb = std::move(fb); fd.gbuf = std::move(gbuf);
+        fd.lookfrom = lf; fd.lookat = active_scenario->camera.lookat; fd.up = active_scenario->camera.up; fd.fov = c_fov;
+        fd.sun_az = sun_az; fd.sun_el = sun_el;
+        fd.objects = std::move(frame_objs);
+        fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
+        io_worker.push(std::move(fd));
+
+        fb.clear(); fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
+        gbuf = GBuffer(o.width, o.height);
+    }
+
+    io_worker.drain();
+    write_coco_fast(cfg.dataset.root + "/scenario_coco.json", io_worker.coco());
+    return 0;
+}
+
 // ---------------------------- MAIN ----------------------------
 int main(int argc, char** argv) {
     if (argc > 1 && std::string(argv[1]) == "forge") {
         return run_forge_subcommand(argc, argv);
+    }
+    if (argc > 1 && std::string(argv[1]) == "scenario") {
+        return run_scenario_subcommand(argc, argv);
     }
 
     Opts o = parse(argc, argv);

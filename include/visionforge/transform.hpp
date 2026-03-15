@@ -199,3 +199,51 @@ public:
 
     bool bounding_box(AABB& out_box) const override { out_box = box; return true; }
 };
+
+// ---------------- Scale ----------------
+class Scale : public Hittable {
+public:
+    std::shared_ptr<Hittable> ptr;
+    Vec3 scale;
+    Vec3 inv_scale;
+
+    Scale(std::shared_ptr<Hittable> p, const Vec3& s)
+    : ptr(std::move(p)), scale(s) {
+        inv_scale = Vec3(
+            s.x == 0.0 ? 0.0 : 1.0 / s.x,
+            s.y == 0.0 ? 0.0 : 1.0 / s.y,
+            s.z == 0.0 ? 0.0 : 1.0 / s.z
+        );
+    }
+
+    bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override {
+        Vec3 scaled_origin(r.origin.x * inv_scale.x, r.origin.y * inv_scale.y, r.origin.z * inv_scale.z);
+        Vec3 scaled_dir(r.direction.x * inv_scale.x, r.direction.y * inv_scale.y, r.direction.z * inv_scale.z);
+        
+        Ray scaled_ray(scaled_origin, scaled_dir, r.time);
+        
+        if (!ptr->hit(scaled_ray, t_min, t_max, rec)) return false;
+        
+        rec.point = Vec3(rec.point.x * scale.x, rec.point.y * scale.y, rec.point.z * scale.z);
+        
+        // Normal transform for non-uniform scale: N = normalize(inv_scale * inv_scale * N) or similar
+        // A simpler exact way is Normal = normalize( vec3(n.x*inv.x, n.y*inv.y, n.z*inv.z) );
+        rec.normal = normalize(Vec3(
+            rec.normal.x * inv_scale.x,
+            rec.normal.y * inv_scale.y,
+            rec.normal.z * inv_scale.z
+        ));
+        
+        return true;
+    }
+
+    bool bounding_box(AABB& out_box) const override {
+        AABB b;
+        if (!ptr->bounding_box(b)) return false;
+        out_box = AABB(
+            Vec3(b.min().x * scale.x, b.min().y * scale.y, b.min().z * scale.z),
+            Vec3(b.max().x * scale.x, b.max().y * scale.y, b.max().z * scale.z)
+        );
+        return true;
+    }
+};

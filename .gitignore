@@ -7,6 +7,8 @@ bin/
 out/
 dataset/
 benchmark_dataset/
+*_out/
+test_output/
 *.ppm
 *.pgm
 *.exr
@@ -22,6 +24,7 @@ benchmark_dataset/
 *.json
 !world.json
 !CMakePresets.json
+!package.json
 
 # OBJ geometry files (compiled object overlap)
 *.obj

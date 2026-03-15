@@ -17,6 +17,7 @@
 * **Semantic grounding**: terrain-aware gravity snapping + slope alignment, so cubes and assets sit flush on dunes with a controllable “sink” depth
 * **Analytic sky + HDR IBL**: built-in sky model with sun + optional `.hdr` environment maps via `stb_image.h` (equirectangular projection)
 * **Triplanar terrain texturing**: “no-UV” ground material that blends a single texture along XYZ, avoiding stretching on steep slopes
+* **Deterministic Scenario Engine**: Handcrafted node-based scenes configured through JSON with kinematic hierarchy (`ScenarioNode`), while retaining domain randomization limits (e.g. lighting/PBR parameters).
 * **Geometry**: OBJ mesh loading (via fast_obj), triangles, axis-aligned rectangles, procedural heightfields
 * **Materials**: PBR (metallic/roughness), Lambertian diffuse, dielectric, metal, emissive area lights
 * **Adaptive sampling** with Welford variance and 95% confidence interval early termination
@@ -45,6 +46,7 @@ VisionForge/
 │  ├─ vec3.hpp                     #   Vec3 + thread-local xoshiro256+ PRNG
 │  ├─ exr_writer.hpp               #   EXR export
 │  ├─ png_writer.hpp               #   PNG export (zlib)
+│  ├─ scene_graph.hpp              #   Hierarchical transforms and Node architecture
 │  └─ ...                          #   materials, camera, labels, transforms
 ├─ src/io/
 │  ├─ exr_writer.cpp               # TinyEXR implementation
@@ -195,6 +197,50 @@ Minimal example using the new asset library and optional HDR sky:
 ### Performance
 
 At 320x180, forge renders **~12ms per frame** (20 OMP threads) with I/O fully overlapped. 1,000 frames complete in under 30 seconds.
+
+---
+
+## Scenario: Deterministic Scene Graphs
+
+The `scenario` subcommand supports crafting distinct environments explicitly mapped by a JSON `SceneNode` hierarchy, ensuring layout invariants while still supporting Domain Randomization for generalized lighting and materials.
+
+**Render a scenario:**
+
+```bash
+./build/visionforge scenario --config world.json --name "MyScenario" --frames 10
+```
+
+Where a `world.json` might define a `Scenario` explicitly structuring parent-child transform inheritance and physical grounding properties:
+
+```json
+{
+  "scenarios": [
+    {
+      "name": "MyScenario",
+      "root_nodes": [
+        {
+          "name": "BaseRover",
+          "asset": "rover",
+          "position": [0, 0, 0],
+          "rotation": [0, 45, 0],
+          "scale": [1, 1, 1],
+          "grounding_constraint": true,
+          "children": [
+            {
+              "name": "CargoBox",
+              "asset": "box",
+              "position": [1.5, 2.0, 0],
+              "scale": [0.5, 0.5, 0.5]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The underlying pipeline traces nested `local_to_world` conversions globally into perfectly registered YOLO / COCO JSON matrices for complex geometries.
 
 ---
 
