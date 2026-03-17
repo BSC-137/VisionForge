@@ -44,7 +44,10 @@ find_package(ZLIB REQUIRED)
 target_link_libraries(vf_io PUBLIC ZLIB::ZLIB)
 
 # ---- Main executable ----
-add_executable(visionforge_app apps/visionforge/main.cpp)
+add_executable(visionforge_app 
+  apps/visionforge/main.cpp
+  src/materials/pbr_material.cpp
+)
 target_link_libraries(visionforge_app PRIVATE visionforge vf_io)
 
 # ---- OpenMP (parallel render) ----

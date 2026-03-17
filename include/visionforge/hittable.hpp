@@ -18,6 +18,10 @@ struct HitRecord {
     Vec3 point;
     Vec3 normal;
     double t = 0.0;
+    // Barycentric coordinates for triangle hits (used to lazily compute UVs in materials).
+    // For non-triangle hits, these remain 0.
+    float bary_u = 0.0f;
+    float bary_v = 0.0f;
     bool front_face = true;
     std::shared_ptr<Material> mat;
 

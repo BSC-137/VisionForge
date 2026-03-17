@@ -11,6 +11,7 @@
 struct MeshData {
     std::vector<Vec3> positions;
     std::vector<Vec3> normals;
+    std::vector<Vec3> texcoords;
 };
 
 class MeshTriangle : public Hittable {
@@ -18,19 +19,24 @@ public:
     std::shared_ptr<const MeshData> data;
     uint32_t i0, i1, i2;
     uint32_t n0, n1, n2;
+    uint32_t t0, t1, t2;
     bool has_normals;
+    bool has_texcoords;
     std::shared_ptr<Material> mat;
     AABB box;
 
     MeshTriangle(std::shared_ptr<const MeshData> d,
                  uint32_t pi0, uint32_t pi1, uint32_t pi2,
                  uint32_t ni0, uint32_t ni1, uint32_t ni2,
-                 bool has_nrm,
+                 uint32_t ti0, uint32_t ti1, uint32_t ti2,
+                 bool has_nrm, bool has_tex,
                  std::shared_ptr<Material> m)
         : data(std::move(d)),
           i0(pi0), i1(pi1), i2(pi2),
           n0(ni0), n1(ni1), n2(ni2),
+          t0(ti0), t1(ti1), t2(ti2),
           has_normals(has_nrm),
+          has_texcoords(has_tex),
           mat(std::move(m))
     {
         const Vec3& p0 = data->positions[i0];
@@ -71,6 +77,8 @@ public:
 
         rec.t = t;
         rec.point = r.at(t);
+        rec.bary_u = static_cast<float>(u);
+        rec.bary_v = static_cast<float>(v);
 
         Vec3 n;
         if (has_normals && n0 < data->normals.size()) {

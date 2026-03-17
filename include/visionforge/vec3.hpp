@@ -89,6 +89,25 @@ inline Vec3   cross(const Vec3& a, const Vec3& b){
 }
 inline Vec3   normalize(Vec3 v){ return v / v.length(); }
 
+// ---------- Mat3 ----------
+class Mat3 {
+public:
+    Vec3 cols[3];
+    Mat3() {
+        cols[0] = Vec3(1, 0, 0);
+        cols[1] = Vec3(0, 1, 0);
+        cols[2] = Vec3(0, 0, 1);
+    }
+    Mat3(const Vec3& c0, const Vec3& c1, const Vec3& c2) {
+        cols[0] = c0;
+        cols[1] = c1;
+        cols[2] = c2;
+    }
+    Vec3 operator*(const Vec3& v) const {
+        return cols[0] * v.x + cols[1] * v.y + cols[2] * v.z;
+    }
+};
+
 // ---------- sampling helpers ----------
 inline Vec3 random_in_unit_sphere() {
     while (true) {

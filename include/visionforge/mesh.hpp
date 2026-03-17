@@ -16,6 +16,7 @@ class Mesh : public Hittable {
 public:
     std::shared_ptr<MeshData> data;
     std::shared_ptr<Material> material;
+    std::vector<std::shared_ptr<Hittable>> original_tris;
     std::shared_ptr<BVHNode>  bvh_root;
     AABB                      bounds;
     size_t                    tri_count = 0;
@@ -68,6 +69,16 @@ private:
             }
         }
 
+        bool has_texcoords = fobj->texcoord_count > 1;
+        if (has_texcoords) {
+            data->texcoords.resize(fobj->texcoord_count);
+            data->texcoords[0] = Vec3(0,0,0);
+            for (unsigned i = 1; i < fobj->texcoord_count; ++i) {
+                float* t = fobj->texcoords + 2 * i;
+                data->texcoords[i] = Vec3(t[0], t[1], 0);
+            }
+        }
+
         auto shared_data = std::const_pointer_cast<const MeshData>(data);
 
         std::vector<std::shared_ptr<Hittable>> tris;
@@ -83,7 +94,8 @@ private:
                     shared_data,
                     fi0.p, fi1.p, fi2.p,
                     fi0.n, fi1.n, fi2.n,
-                    has_normals, material));
+                    fi0.t, fi1.t, fi2.t,
+                    has_normals, has_texcoords, material));
             }
             idx_off += fv;
         }
@@ -91,6 +103,7 @@ private:
         fast_obj_destroy(fobj);
 
         tri_count = tris.size();
+        original_tris = tris;
         if (tris.empty()) {
             std::cerr << "Mesh: no triangles in " << path << "\n";
             return false;
