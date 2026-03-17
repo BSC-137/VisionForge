@@ -2,34 +2,33 @@
 build/
 dist/
 bin/
+cmake-build-*/
+
+# Compilation database
+compile_commands.json
 
 # Render & dataset outputs
 out/
 dataset/
-examples/
 benchmark_dataset/
+*_out/
+industrial_test_out/
+stack_test_out/
+
+# Local test assets / scratch
 test_models/
-*.ppm
-*.pgm
-*.exr
-*.png
-*.jpg
-*.jpeg
+surface_*.jpg
+surface_*.jpeg
+surface_*.png
 
 # HDR sky / environment maps (large, user-specific)
 *.hdr
 
-# Label / annotation outputs
+# Label / annotation outputs (generated)
 *.csv
-*.json
-!world.json
-!CMakePresets.json
 
 # Test files and outputs
 *_test.json
-test_models/
-test_cube.obj
-*_out/
 
 # OBJ geometry files (compiled object overlap)
 *.obj
@@ -76,3 +75,6 @@ Makefile
 CPackConfig.cmake
 CPackSourceConfig.cmake
 install_manifest.txt
+
+# Profiling / logs
+*.log

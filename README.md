@@ -13,6 +13,7 @@
 * **G-Buffer export**: per-pixel depth, world-space normals, and instance IDs as 32-bit float OpenEXR
 * **One-pass labeling**: bounding boxes computed from the G-Buffer in a single scan, feeding YOLO `.txt`, COCO `.json`, CSV, and JSON simultaneously
 * **BVH acceleration** with longest-extent axis splitting over all scene primitives
+* **Phase 8 textures without Phase 7 slowdown**: UVs (and normal-map TBN basis) are computed lazily *only when* a material actually has textures bound
 * **Procedural terrain**: ridged fractal heightfield with domain-warped Perlin noise and micro-bump normals
 * **Semantic grounding**: terrain-aware gravity snapping + slope alignment, so cubes and assets sit flush on dunes with a controllable “sink” depth
 * **Analytic sky + HDR IBL**: built-in sky model with sun + optional `.hdr` environment maps via `stb_image.h` (equirectangular projection)
@@ -410,6 +411,11 @@ Every forged frame:
 | Manual render (320x180, 1 spp) | ~0.2s |
 | Manual render (320x180, 128 spp) | ~3s |
 | Manual render (640x360, 128 spp) | ~12s |
+
+Notes:
+
+- **Lazy texture work**: `MeshTriangle::hit()` returns only geometry; `PBRMaterial::scatter()` computes UVs from barycentrics only on the textured branch.
+- **Scene graph packing cache**: `SceneNode::flat_pack()` caches the baked BVH when the node’s object + world transform are unchanged, avoiding per-frame BVH rebuilds in `forge` / `scenario`.
 
 Measured on 20-thread Xeon (WSL2). Build with `-DCMAKE_BUILD_TYPE=Release -DVISIONFORGE_OMP=ON`.
 
