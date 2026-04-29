@@ -34,6 +34,7 @@ VisionForge/
 ├─ include/visionforge/            # Engine headers
 │  ├─ pbr_material.hpp             #   PBR material (Cook-Torrance, GGX sampling)
 │  ├─ world_config.hpp             #   Forge JSON config parser (render, camera, lighting, terrain, assets[])
+│  ├─ config_keys.hpp              #   Canonical JSON key names for configs
 │  ├─ mesh.hpp                     #   OBJ mesh loader (per-mesh BVH)
 │  ├─ bvh.hpp                      #   BVH node (longest-extent axis split)
 │  ├─ passes.hpp                   #   GBuffer (depth, normals, instance IDs)
@@ -90,6 +91,11 @@ cmake --build build -j
 
 The executable is written to `./build/visionforge`.
 
+Optional parser tests:
+
+```bash
+ctest --test-dir build -R world_config
+```
 ---
 
 ## Forge: Synthetic Data Factory
@@ -194,6 +200,15 @@ Minimal example using the new asset library and optional HDR sky:
   }
 }
 ```
+
+### Config schema notes (canonical keys & validation)
+
+- **Stable identifiers**: Root sections include `render`, `camera`, `lighting`, `terrain`, `assets` (or legacy singular `asset`), optional `hdr`, `placement`, `dataset`, and optional `scenarios`. Canonical mesh paths live under **`path`**. Canonical asset textures use **`albedo_map`**, **`normal_map`**, **`roughness_map`**, **`metallic_map`** (see `include/visionforge/config_keys.hpp`).
+- **Strict parsing**: `visionforge forge` and `visionforge scenario` load configs with **strict validation** (`unknown keys` are rejected; deprecated aliases fail with an actionable message). Programmatic callers may pass `{ .strict = false }` to `load_world_config` when migrating legacy files (warnings print to stderr; aliases map onto canonical fields).
+- **Deprecation**: **`albedo_path`**, **`normal_path`**, **`roughness_path`**, **`metallic_path`** → use `*_map` keys instead. **`obj`** as a mesh path field → use **`path`**. Deprecated texture aliases emit `[world.json warning]` when non-strict; strict mode rejects them.
+- **`terrain` bounds**: Use **`terrain.bounds`** `{ xmin, xmax, zmin, zmax }` and/or **flat** `xmin`/`xmax`/`zmin`/`zmax` on `terrain` (flat keys override `bounds` if both are set; a warning is printed when non-strict).
+- **`hdr`**: Either a **string** path at `"hdr"`, or an **object** `{ "path": "...", "intensity": 1.0 }`.
+- **Scenarios**: Each scenario requires a non-empty **`name`**. **`root_nodes[].asset`** must reference an **`assets[].name`** defined in the same file.
 
 ### Performance
 

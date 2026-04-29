@@ -1007,7 +1007,7 @@ static void write_coco_fast(const std::string& path, const CocoWriter& coco) {
 
 static int run_forge_subcommand(int argc, char** argv) {
     ForgeCli cli = parse_forge_cli(argc, argv);
-    WorldConfig cfg = load_world_config(cli.config_path);
+    WorldConfig cfg = load_world_config(cli.config_path, {.strict = true});
 
     // --- Bun-style CLI Overrides ---
     // These allow terminal flags to win over world.json values
@@ -1215,7 +1215,7 @@ static int run_forge_subcommand(int argc, char** argv) {
 
 static int run_scenario_subcommand(int argc, char** argv) {
     ForgeCli cli = parse_scenario_cli(argc, argv);
-    WorldConfig cfg = load_world_config(cli.config_path);
+    WorldConfig cfg = load_world_config(cli.config_path, {.strict = true});
 
     // Apply basic flags as run_forge does
     if (cli.width  > 0) cfg.render.width  = cli.width;

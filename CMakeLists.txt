@@ -93,6 +93,15 @@ set_target_properties(visionforge_app PROPERTIES OUTPUT_NAME "visionforge")
 install(TARGETS visionforge_app RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
 
+# ---- Unit tests ----
+option(VISIONFORGE_TESTS "Build unit tests" ON)
+if(VISIONFORGE_TESTS)
+  add_executable(test_world_config tests/test_world_config.cpp)
+  target_link_libraries(test_world_config PRIVATE visionforge)
+  enable_testing()
+  add_test(NAME world_config COMMAND test_world_config)
+endif()
+
 set(CPACK_PACKAGE_NAME "visionforge")
 set(CPACK_PACKAGE_VENDOR "VisionForge")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
