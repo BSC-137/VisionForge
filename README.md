@@ -23,6 +23,7 @@
 * **Materials**: PBR (metallic/roughness), Lambertian diffuse, dielectric, metal, emissive area lights
 * **Adaptive sampling** with Welford variance and 95% confidence interval early termination
 * **OpenMP parallelization** across all render paths
+* **`manifest.json` (schema `1`)**: written once per dataset export (`forge`, `scenario`, or legacy CLI directory mode). Captures engine and Git identifiers (best-effort), schema version (`vf::k_manifest_schema_version`), the argv/CWD/timestamp used for the run, RNG semantics notes for reproducibility, the resolved world config as canonical JSON (optional SHA-256), OpenMP thread hints (best-effort), dataset split/layout metadata, and a stable `dataset_id` hex fingerprint for indexing. CPU model and thread fields may be absent or approximate; manifest write failures are logged loudly and never abort rendering.
 
 ---
 
@@ -34,6 +35,7 @@ VisionForge/
 ├─ include/visionforge/            # Engine headers
 │  ├─ pbr_material.hpp             #   PBR material (Cook-Torrance, GGX sampling)
 │  ├─ world_config.hpp             #   Forge JSON config parser (render, camera, lighting, terrain, assets[])
+│  ├─ dataset_manifest.hpp         #   Dataset export manifest (`manifest.json`) helpers + schema version constant
 │  ├─ config_keys.hpp              #   Canonical JSON key names for configs
 │  ├─ mesh.hpp                     #   OBJ mesh loader (per-mesh BVH)
 │  ├─ bvh.hpp                      #   BVH node (longest-extent axis split)
@@ -51,6 +53,7 @@ VisionForge/
 │  ├─ scene_graph.hpp              #   Hierarchical transforms and Node architecture
 │  └─ ...                          #   materials, camera, labels, transforms
 ├─ src/io/
+│  ├─ dataset_manifest.cpp         # Atomic manifest writer + resolved-config JSON + SHA-256
 │  ├─ exr_writer.cpp               # TinyEXR implementation
 │  ├─ png_writer.cpp               # Minimal PNG writer
 │  ├─ fast_obj.cpp                 # fast_obj implementation unit

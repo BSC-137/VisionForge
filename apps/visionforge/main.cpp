@@ -6,7 +6,6 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
-#include <iomanip>
 #include <chrono>
 #include <cstdlib>
 #include <random>
@@ -51,7 +50,9 @@
 #include "visionforge/image_texture.hpp"
 #include "visionforge/triplanar_material.hpp"
 #include "visionforge/asset_manager.hpp"
+#include "visionforge/dataset_manifest.hpp"
 #include <nlohmann/json.hpp>
+#include <ctime>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -343,6 +344,97 @@ static Opts parse(int argc, char** argv) {
     return o;
 }
 
+static std::string join_argv(int argc, char** argv) {
+    std::string s;
+    for (int i = 0; i < argc; ++i) {
+        if (i) s += ' ';
+        s += argv[i];
+    }
+    return s;
+}
+
+static std::string utc_iso8601_seconds() {
+    using Clock = std::chrono::system_clock;
+    const auto now = Clock::now();
+    const std::time_t t = Clock::to_time_t(now);
+    std::tm tm_buf{};
+#if defined(_WIN32)
+    gmtime_s(&tm_buf, &t);
+#else
+    gmtime_r(&t, &tm_buf);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm_buf);
+    return buf;
+}
+
+static nlohmann::json legacy_cli_resolved_json(const Opts& o) {
+    return {
+        {"mode", "legacy_cli"},
+        {"out", o.out},
+        {"render",
+         {"width", o.width},
+          {"height", o.height},
+          {"spp", o.spp},
+          {"max_depth", o.max_depth},
+          {"preview", o.preview},
+          {"seed", o.seed},
+          {"min_spp", o.min_spp},
+          {"rel_noise_target", o.rel_noise_target},
+          {"light_samples_preview", o.light_samples_preview},
+          {"light_samples_final", o.light_samples_final},
+          {"spp_preview", o.spp_preview}},
+        {"exposure_comp", o.exposure_comp},
+        {"sky_gain", o.sky_gain},
+        {"sun_az_deg", o.sun_az_deg},
+        {"sun_el_deg", o.sun_el_deg},
+        {"turbidity", o.turbidity},
+        {"camera",
+         {"lookfrom", nlohmann::json::array({o.lookfrom.x, o.lookfrom.y, o.lookfrom.z})},
+          {"lookat", nlohmann::json::array({o.lookat.x, o.lookat.y, o.lookat.z})},
+          {"fov_deg", o.fov_deg}},
+        {"terrain",
+         {"amp", o.terrain_amp},
+          {"scale", o.terrain_scale},
+          {"nx", o.terrain_nx},
+          {"nz", o.terrain_nz},
+          {"bounds", {{"xmin", o.XMIN}, {"xmax", o.XMAX}, {"zmin", o.ZMIN}, {"zmax", o.ZMAX}}}},
+        {"sand_bump", {"freq", o.sand_bump_freq}, {"scale", o.sand_bump_scale}},
+        {"cubes",
+         {"count", o.cubes},
+          {"edge_min", o.cube_edge_min},
+          {"edge_max", o.cube_edge_max},
+          {"tilt_abs_deg", o.cube_tilt_abs},
+          {"colors_csv", o.cube_colors_csv},
+          {"placement", o.cube_placement},
+          {"min_spacing", o.cube_min_spacing}},
+        {"light",
+         {"x", o.light_x},
+          {"y0", o.light_y0},
+          {"y1", o.light_y1},
+          {"z0", o.light_z0},
+          {"z1", o.light_z1},
+          {"color", nlohmann::json::array({o.light_color.x, o.light_color.y, o.light_color.z})},
+          {"intensity", o.light_intensity},
+          {"show_on_primary", o.show_light_on_primary},
+          {"match_sky_to_light", o.match_sky_to_light}},
+        {"mesh",
+         {"obj_path", o.obj_path},
+          {"obj_pos", nlohmann::json::array({o.obj_pos.x, o.obj_pos.y, o.obj_pos.z})},
+          {"obj_scale", o.obj_scale},
+          {"obj_color_token", o.obj_color},
+          {"sink", o.obj_sink}},
+        {"io",
+         {"write_exr", o.write_exr},
+          {"depth_only", o.depth_only},
+          {"write_bbox_overlay", o.write_bbox_overlay}},
+        {"hdr_path", o.hdr_path},
+        {"hdr_intensity", o.hdr_intensity},
+        {"ground_tex_path", o.ground_tex_path},
+        {"ground_scale", o.ground_scale},
+    };
+}
+
 // HeightField is now in include/visionforge/terrain.hpp
 // SlopeAlign + snap_y are in include/visionforge/placement.hpp
 
@@ -567,22 +659,6 @@ static std::shared_ptr<Hittable> make_unit_cube(const Vec3& c, double edge, cons
     list->add(std::make_shared<YZRect>(y0, y1, z0, z1, x0, m)); // left
     list->add(std::make_shared<YZRect>(y0, y1, z0, z1, x1, m)); // right
     return list;
-}
-
-// Manifest
-static void write_manifest(const std::string& outdir, const Opts& o, int actual_avg_spp, double seconds) {
-    std::ofstream j(outdir + "/manifest.json");
-    j << std::fixed << std::setprecision(3);
-    j << "{\n"
-      << "  \"tool\": \"VisionForge\",\n"
-      << "  \"width\": " << o.width << ",\n"
-      << "  \"height\": " << o.height << ",\n"
-      << "  \"spp_target\": " << o.spp << ",\n"
-      << "  \"spp_avg\": " << actual_avg_spp << ",\n"
-      << "  \"max_depth\": " << o.max_depth << ",\n"
-      << "  \"seed\": " << o.seed << ",\n"
-      << "  \"seconds\": " << seconds << "\n"
-      << "}\n";
 }
 
 struct ForgeCli {
@@ -1208,6 +1284,30 @@ static int run_forge_subcommand(int argc, char** argv) {
 
     std::cout << "Rendering done. Avg render: " << (int)(total_render_ms / cli.frames) << "ms/frame. Flushing I/O...\n";
     io_worker.drain();
+
+    {
+        vf::DatasetManifestParams mp;
+        mp.argv_joined = join_argv(argc, argv);
+        mp.cwd = std::filesystem::current_path().string();
+        mp.timestamp_iso_utc = utc_iso8601_seconds();
+        mp.job_kind = "forge";
+        mp.config_path = cli.config_path;
+        mp.resolved_config = vf::world_config_to_resolved_json(cfg);
+        mp.frames_total = cli.frames;
+        mp.train_frames = train_count;
+        mp.val_frames = cli.frames - train_count;
+        mp.dataset_root = cfg.dataset.root;
+        mp.render_seed = cfg.render.seed;
+        mp.dataset_rng_note =
+            "std::mt19937 domain_randomization_rng uses cfg.render.seed XOR 0x9e3779b9u for placement/light/asset "
+            "sampling (see run_forge_subcommand). "
+            "Each rendered frame calls vf_rng::seed_thread_rng(uint64_t(cfg.render.seed) + frame_index).";
+        mp.forge_io_had_error = io_worker.had_error();
+        if (cli.frames > 0)
+            mp.render_summary["avg_render_ms_per_frame"] = total_render_ms / double(cli.frames);
+        vf::write_dataset_manifest_atomic(std::filesystem::path(cfg.dataset.root) / "manifest.json", mp);
+    }
+
     write_coco_fast(cfg.dataset.root + "/annotations_coco.json", io_worker.coco());
 
     return 0;
@@ -1403,12 +1503,49 @@ static int run_scenario_subcommand(int argc, char** argv) {
     }
 
     io_worker.drain();
+
+    {
+        vf::DatasetManifestParams mp;
+        mp.argv_joined = join_argv(argc, argv);
+        mp.cwd = std::filesystem::current_path().string();
+        mp.timestamp_iso_utc = utc_iso8601_seconds();
+        mp.job_kind = "scenario";
+        mp.config_path = cli.config_path;
+        mp.resolved_config = vf::world_config_to_resolved_json(cfg);
+        mp.active_scenario = cli.scenario_name;
+        mp.frames_total = cli.frames;
+        mp.train_frames = train_count;
+        mp.val_frames = cli.frames - train_count;
+        mp.dataset_root = cfg.dataset.root;
+        mp.render_seed = cfg.render.seed;
+        mp.dataset_rng_note =
+            "std::mt19937 domain_randomization_rng uses cfg.render.seed XOR 0xabcdef12u for lighting/material DR "
+            "(see run_scenario_subcommand). "
+            "Each rendered frame calls vf_rng::seed_thread_rng(uint64_t(cfg.render.seed) + frame_index).";
+        mp.forge_io_had_error = io_worker.had_error();
+        if (cli.frames > 0)
+            mp.render_summary["avg_render_ms_per_frame"] = total_render_ms / double(cli.frames);
+        vf::write_dataset_manifest_atomic(std::filesystem::path(cfg.dataset.root) / "manifest.json", mp);
+    }
+
     write_coco_fast(cfg.dataset.root + "/scenario_coco.json", io_worker.coco());
     return 0;
 }
 
 // ---------------------------- MAIN ----------------------------
 int main(int argc, char** argv) {
+    if (argc >= 2) {
+        std::string ver_flag(argv[1]);
+        if (ver_flag == "--version" || ver_flag == "-V") {
+#ifdef VF_ENGINE_VERSION_STR
+            std::cout << VF_ENGINE_VERSION_STR << "\n";
+#else
+            std::cout << "unknown\n";
+#endif
+            return 0;
+        }
+    }
+
     if (argc > 1 && std::string(argv[1]) == "forge") {
         return run_forge_subcommand(argc, argv);
     }
@@ -1876,7 +2013,33 @@ int main(int argc, char** argv) {
         }
     }
 
-    write_manifest(o.out, o, avg_spp, render_secs);
+    {
+        vf::DatasetManifestParams mp;
+        mp.argv_joined = join_argv(argc, argv);
+        mp.cwd = std::filesystem::current_path().string();
+        mp.timestamp_iso_utc = utc_iso8601_seconds();
+        mp.job_kind = "legacy_cli";
+        mp.config_path = "";
+        mp.resolved_config = legacy_cli_resolved_json(o);
+        mp.frames_total = 1;
+        mp.train_frames = 1;
+        mp.val_frames = 0;
+        mp.dataset_root = o.out;
+        mp.render_seed = o.seed;
+        mp.dataset_rng_note =
+            "Cube/object placement uses std::mt19937 with seed (Opts.seed XOR 0x9e3779b1u). "
+            "Terrain HeightField uses fixed procedural seed 1337 (see main.cpp). "
+            "Main render calls vf_rng::seed_thread_rng(o.seed); scanlines re-seed with "
+            "vf_rng::seed_thread_rng(uint64_t(row) * 0x9e3779b97f4a7c15ULL + o.seed).";
+        mp.render_summary = {{"width", o.width},
+                             {"height", o.height},
+                             {"spp_target", o.spp},
+                             {"spp_avg", avg_spp},
+                             {"max_depth", o.max_depth},
+                             {"seconds_render", render_secs},
+                             {"depth_only", o.depth_only}};
+        vf::write_dataset_manifest_atomic(std::filesystem::path(o.out) / "manifest.json", mp);
+    }
 
     auto t_io_end = std::chrono::high_resolution_clock::now();
     double io_secs = std::chrono::duration<double>(t_io_end - t_io_start).count();

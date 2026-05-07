@@ -1,6 +1,30 @@
 cmake_minimum_required(VERSION 3.16)
 project(VisionForge VERSION 0.1.0 LANGUAGES CXX)
 
+# ---- Git metadata (best-effort, embedded as compile defs for manifest.json) ----
+set(VF_GIT_COMMIT "unknown")
+set(VF_GIT_DIRTY 0)
+if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} rev-parse HEAD
+      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+      OUTPUT_VARIABLE VF_GIT_COMMIT
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} diff-index --quiet HEAD --
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+      RESULT_VARIABLE VF_GIT_DIFF_EXIT
+    )
+    if(NOT VF_GIT_DIFF_EXIT EQUAL 0)
+      set(VF_GIT_DIRTY 1)
+    endif()
+  endif()
+endif()
+
 # ---- C++ standard ----
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,8 +71,16 @@ target_link_libraries(vf_io PUBLIC ZLIB::ZLIB)
 add_executable(visionforge_app 
   apps/visionforge/main.cpp
   src/materials/pbr_material.cpp
+  src/io/dataset_manifest.cpp
 )
 target_link_libraries(visionforge_app PRIVATE visionforge vf_io)
+target_compile_definitions(visionforge_app PRIVATE
+  "VF_ENGINE_VERSION_STR=\"${PROJECT_VERSION}\""
+  "VF_GIT_COMMIT_STR=\"${VF_GIT_COMMIT}\""
+)
+if(VF_GIT_DIRTY)
+  target_compile_definitions(visionforge_app PRIVATE VF_GIT_DIRTY=1)
+endif()
 
 # ---- OpenMP (parallel render) ----
 if (VISIONFORGE_OMP)
@@ -98,8 +130,15 @@ option(VISIONFORGE_TESTS "Build unit tests" ON)
 if(VISIONFORGE_TESTS)
   add_executable(test_world_config tests/test_world_config.cpp)
   target_link_libraries(test_world_config PRIVATE visionforge)
+  add_executable(test_dataset_manifest tests/test_dataset_manifest.cpp src/io/dataset_manifest.cpp)
+  target_link_libraries(test_dataset_manifest PRIVATE visionforge)
+  target_compile_definitions(test_dataset_manifest PRIVATE
+    "VF_ENGINE_VERSION_STR=\"test\""
+    "VF_GIT_COMMIT_STR=\"unknown\""
+  )
   enable_testing()
   add_test(NAME world_config COMMAND test_world_config)
+  add_test(NAME dataset_manifest COMMAND test_dataset_manifest)
 endif()
 
 set(CPACK_PACKAGE_NAME "visionforge")
