@@ -99,6 +99,17 @@ Optional parser tests:
 ```bash
 ctest --test-dir build -R world_config
 ```
+
+## Verification
+
+Optional post-render QA for exported dataset directories (Python 3.10+, stdlib only):
+
+```bash
+./scripts/validate_dataset.py --dataset-root <outdir>
+```
+
+See `./scripts/validate_dataset.py --help` for `--split`, `--strict`, `--json-report`, COCO discovery overrides, bbox thresholds, and `--check-meta` (pose/camera sidecars).
+
 ---
 
 ## Forge: Synthetic Data Factory
@@ -123,6 +134,8 @@ The `forge` subcommand generates labeled training data at scale with full domain
 | Global file | Description |
 |-------------|-------------|
 | `annotations_coco.json` | COCO-format annotations for the entire dataset |
+
+The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (instead of `frame_XXXX`) and writes `scenario_coco.json` at the dataset root.
 
 ### Domain randomization parameters (`world.json`)
 
