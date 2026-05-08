@@ -48,6 +48,7 @@ VisionForge/
 │  ├─ terrain.hpp                  #   HeightField + world-space height/normal queries
 │  ├─ placement.hpp                #   SlopeAlign + snap_y grounding helpers
 │  ├─ vec3.hpp                     #   Vec3 + thread-local xoshiro256+ PRNG
+│  ├─ meta_pose.hpp               #   Camera c2w + intrinsics + logical object TRS helpers for dataset meta
 │  ├─ exr_writer.hpp               #   EXR export
 │  ├─ png_writer.hpp               #   PNG export (zlib)
 │  ├─ scene_graph.hpp              #   Hierarchical transforms and Node architecture
@@ -128,14 +129,16 @@ The `forge` subcommand generates labeled training data at scale with full domain
 |------|-------------|
 | `frame_XXXX.png` | PBR-rendered RGB |
 | `frame_XXXX_spatial.exr` | G-Buffer EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z` (float32) |
-| `frame_XXXX_meta.json` | Full randomized state (camera, sun, materials, transforms) |
-| `frame_XXXX.txt` | YOLO labels (class, cx, cy, w, h — normalized) |
-
-| Global file | Description |
-|-------------|-------------|
-| `annotations_coco.json` | COCO-format annotations for the entire dataset |
+| `frame_XXXX_meta.json` | Frame metadata: `camera_extrinsics` (16 floats, **c2w** row-major), `camera_intrinsics` (`fx`,`fy`,`cx`,`cy`, vertical `vfov_deg`), legacy `camera` block, sun, and `objects[]` with full `rotation_deg` / `scale`, `local_to_world_row_major`, `grounding_constraint`, `terrain_normal`, `transform_supervision` |
 
 The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (instead of `frame_XXXX`) and writes `scenario_coco.json` at the dataset root.
+
+### Meta / pose convention (`*_meta.json`)
+
+- **`camera_extrinsics`**: row-major \(4 \times 4\) **camera-to-world** transform \(P_{\mathrm{world}} = M \, P_{\mathrm{cam}}\) (homogeneous column). Rotation columns in world space follow an OpenCV-style right-handed camera: **+X** = renderer `Camera::u` (right), **+Y** = \(-\) `Camera::v` (image \(t\) increases along \(+v\), so “down” in pixels aligns with \(+v\) in world), **+Z** = \(-\) `Camera::w` (forward into the scene; `w = normalize(lookfrom - lookat)`). Translation is `Camera::origin` (`lookfrom`). Derived from the same `Camera` instance used for `get_ray`, not a recomputed look-at.
+- **`camera_intrinsics`**: pinhole **\(f_x, f_y, c_x, c_y\)** chosen so pixel \((i,j)\) maps to `get_ray`’s \((s,t) = (i/\max(W-1,1),\, j/\max(H-1,1))\), with \(c_x=(W-1)/2\), \(c_y=(H-1)/2\). `fov_deg` in `camera` is **vertical** FOV (same as `vfov_deg` in intrinsics). Use `skew: 0`.
+- **Objects**: `instance_id` matches G-buffer / EXR **`InstanceID`**. `local_to_world_row_major` encodes **logical** pose \(R_z R_y R_x \,\mathrm{diag}(s)\) plus translation from `SceneNode::world_transform`, matching Euler order in `flat_pack` **before** terrain **slope alignment** and **vertex snap** on grounded assets. When `grounding_constraint` is true, `transform_supervision` is `logical_excludes_slope_and_vertex_snap`; use rasterized labels / EXR for exact silhouette supervision.
+- **`validate_dataset.py --check-meta`** expects the fields above. Older datasets without `camera_extrinsics` will fail this check until re-rendered.
 
 ### Domain randomization parameters (`world.json`)
 

@@ -22,6 +22,7 @@
 #include "visionforge/yz_rect.hpp"
 #include "visionforge/xy_rect.hpp"
 #include "visionforge/camera.hpp"
+#include "visionforge/meta_pose.hpp"
 #include "visionforge/material.hpp"
 #include "visionforge/lambertian.hpp"
 #include "visionforge/diffuse_light.hpp"
@@ -883,8 +884,12 @@ struct FrameObject {
     uint32_t instance_id;
     uint32_t class_id;
     std::string label;
-    double x, y, z, yaw;
+    Vec3 position;
+    Vec3 rotation_deg;
+    Vec3 scale;
     double roughness, metallic;
+    bool grounding_constraint = false;
+    Vec3 terrain_normal{0, 1, 0};
 };
 
 struct ForgeFrameData {
@@ -903,6 +908,10 @@ struct ForgeFrameData {
     double fov;
     double sun_az, sun_el;
 
+    Vec3 cam_origin;
+    Vec3 cam_u, cam_v, cam_w;
+    double focus_dist = 0;
+
     std::vector<FrameObject> objects;
 
     int spp_target, max_depth;
@@ -913,34 +922,59 @@ static void write_meta_fast(const std::string& path, const ForgeFrameData& f) {
     FILE* fp = std::fopen(path.c_str(), "wb");
     if (!fp) return;
 
+    double fx = 0, fy = 0, cx = 0, cy = 0;
+    vf::meta_pose::pinhole_intrinsics_match_renderer(f.width, f.height, f.fov, fx, fy, cx, cy);
+    double c2w[16];
+    vf::meta_pose::camera_c2w_from_basis_row_major(f.cam_u, f.cam_v, f.cam_w, f.cam_origin, c2w);
+
+    std::fprintf(fp, "{\"frame_id\":%d,\"split\":\"%s\",\"image_width\":%d,\"image_height\":%d,",
+                 f.frame_id, f.is_train ? "train" : "val", f.width, f.height);
     std::fprintf(fp,
-R"({"frame_id":%d,"split":"%s","image_width":%d,"image_height":%d,)"
-R"("render":{"spp_target":%d,"spp_avg":%d,"max_depth":%d,"seed":%u},)"
-R"("camera":{"lookfrom":[%.8g,%.8g,%.8g],"lookat":[%.8g,%.8g,%.8g],)"
-R"("up":[%.8g,%.8g,%.8g],"fov_deg":%.8g},)"
-R"("sun":{"azimuth_deg":%.8g,"elevation_deg":%.8g},)"
-R"("objects":[)",
-        f.frame_id, f.is_train ? "train" : "val", f.width, f.height,
-        f.spp_target, f.avg_spp, f.max_depth, f.seed,
-        f.lookfrom.x, f.lookfrom.y, f.lookfrom.z,
-        f.lookat.x, f.lookat.y, f.lookat.z,
-        f.up.x, f.up.y, f.up.z, f.fov,
-        f.sun_az, f.sun_el);
+                 "\"convention\":{\"camera_to_world\":\"row_major_4x4\","
+                 "\"handedness\":\"right\","
+                 "\"object_transform_note\":"
+                 "\"local_to_world_row_major_is_RzRyRx_times_scale_plus_translation_only;"
+                 "flat_pack_slope_alignment_and_vertex_snap_omitted_when_grounding\"},"
+                 "\"camera_extrinsics\":[");
+    for (int i = 0; i < 16; ++i)
+        std::fprintf(fp, "%s%.17g", (i ? "," : ""), c2w[i]);
+    std::fprintf(fp,
+                 "],\"camera_intrinsics\":{"
+                 "\"fx\":%.17g,\"fy\":%.17g,\"cx\":%.17g,\"cy\":%.17g,"
+                 "\"vfov_deg\":%.17g,\"skew\":0,"
+                 "\"pixel_ray\":\"s=i/max(W-1,1),t=j/max(H-1,1)_via_Camera::get_ray\"},"
+                 "\"render\":{\"spp_target\":%d,\"spp_avg\":%d,\"max_depth\":%d,\"seed\":%u},"
+                 "\"camera\":{\"lookfrom\":[%.8g,%.8g,%.8g],\"lookat\":[%.8g,%.8g,%.8g],"
+                 "\"up\":[%.8g,%.8g,%.8g],\"fov_deg\":%.8g,\"focus_dist\":%.8g},"
+                 "\"sun\":{\"azimuth_deg\":%.8g,\"elevation_deg\":%.8g},"
+                 "\"objects\":[",
+                 fx, fy, cx, cy, f.fov, f.spp_target, f.avg_spp, f.max_depth, f.seed, f.lookfrom.x, f.lookfrom.y,
+                 f.lookfrom.z, f.lookat.x, f.lookat.y, f.lookat.z, f.up.x, f.up.y, f.up.z, f.fov, f.focus_dist,
+                 f.sun_az, f.sun_el);
 
     for (size_t i = 0; i < f.objects.size(); ++i) {
         const auto& obj = f.objects[i];
-        const double yaw_rad = obj.yaw * PI / 180.0;
-        const double c = std::cos(yaw_rad), s = std::sin(yaw_rad);
+        double om[16];
+        vf::meta_pose::logical_object_c2w_row_major(obj.rotation_deg, obj.scale, obj.position, om);
+        const char* tsup =
+            obj.grounding_constraint ? "logical_excludes_slope_and_vertex_snap" : "logical_matches_baked_mesh";
         std::fprintf(fp,
-R"({"instance_id":%u,"class_id":%u,"label":"%s",)"
-R"("position":[%.8g,%.8g,%.8g],"rotation_y_deg":%.8g,)"
-R"("roughness":%.8g,"metallic":%.8g,)"
-R"("local_to_world":[[%.8g,0,%.8g,%.8g],[0,1,0,%.8g],[%.8g,0,%.8g,%.8g],[0,0,0,1]]}%s)",
-            obj.instance_id, obj.class_id, obj.label.c_str(),
-            obj.x, obj.y, obj.z, obj.yaw,
-            obj.roughness, obj.metallic,
-            c, s, obj.x, obj.y, -s, c, obj.z,
-            (i + 1 < f.objects.size()) ? "," : "");
+                     "{\"instance_id\":%u,\"class_id\":%u,\"label\":\"%s\","
+                     "\"position\":[%.8g,%.8g,%.8g],"
+                     "\"rotation_deg\":[%.8g,%.8g,%.8g],"
+                     "\"scale\":[%.8g,%.8g,%.8g],"
+                     "\"roughness\":%.8g,\"metallic\":%.8g,"
+                     "\"grounding_constraint\":%s,"
+                     "\"terrain_normal\":[%.8g,%.8g,%.8g],"
+                     "\"transform_supervision\":\"%s\","
+                     "\"local_to_world_row_major\":[",
+                     obj.instance_id, obj.class_id, obj.label.c_str(), obj.position.x, obj.position.y, obj.position.z,
+                     obj.rotation_deg.x, obj.rotation_deg.y, obj.rotation_deg.z, obj.scale.x, obj.scale.y, obj.scale.z,
+                     obj.roughness, obj.metallic, obj.grounding_constraint ? "true" : "false", obj.terrain_normal.x,
+                     obj.terrain_normal.y, obj.terrain_normal.z, tsup);
+        for (int k = 0; k < 16; ++k)
+            std::fprintf(fp, "%s%.17g", (k ? "," : ""), om[k]);
+        std::fprintf(fp, "]}%s", (i + 1 < f.objects.size()) ? "," : "");
     }
     std::fprintf(fp, "]}\n");
     std::fclose(fp);
@@ -1265,11 +1299,21 @@ static int run_forge_subcommand(int argc, char** argv) {
         fo.instance_id = 1;
         fo.class_id = asset.config.class_id;
         fo.label = asset.config.label;
-        fo.x = obj_x; fo.y = obj_y; fo.z = obj_z; fo.yaw = obj_yaw;
-        fo.roughness = obj_roughness; fo.metallic = obj_metallic;
+        fo.position = node->world_transform.position;
+        fo.rotation_deg = node->world_transform.rotation;
+        fo.scale = node->world_transform.scale;
+        fo.roughness = obj_roughness;
+        fo.metallic = obj_metallic;
+        fo.grounding_constraint = node->grounding_constraint;
+        fo.terrain_normal = node->terrain_normal;
         fd.objects.push_back(fo);
 
         fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
+        fd.cam_origin = cam.origin;
+        fd.cam_u = cam.u;
+        fd.cam_v = cam.v;
+        fd.cam_w = cam.w;
+        fd.focus_dist = focus_dist;
 
         io_worker.push(std::move(fd));
 
@@ -1449,11 +1493,12 @@ static int run_scenario_subcommand(int argc, char** argv) {
                 fo.instance_id = n->instance_id;
                 fo.class_id = n->class_id;
                 fo.label = n->label;
-                fo.x = n->world_transform.position.x;
-                fo.z = n->world_transform.position.z;
-                fo.yaw = n->world_transform.rotation.y;
-                fo.y = n->world_transform.position.y;
-                
+                fo.position = n->world_transform.position;
+                fo.rotation_deg = n->world_transform.rotation;
+                fo.scale = n->world_transform.scale;
+                fo.grounding_constraint = n->grounding_constraint;
+                fo.terrain_normal = n->terrain_normal;
+
                 double rough = 0.5, metal = 0.0;
                 if (!n->label.empty() || !n->name.empty()) {
                     auto* la = asset_mgr.find_by_name(n->label.empty() ? n->name : n->label);
@@ -1496,6 +1541,11 @@ static int run_scenario_subcommand(int argc, char** argv) {
         fd.sun_az = sun_az; fd.sun_el = sun_el;
         fd.objects = std::move(frame_objs);
         fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
+        fd.cam_origin = cam.origin;
+        fd.cam_u = cam.u;
+        fd.cam_v = cam.v;
+        fd.cam_w = cam.w;
+        fd.focus_dist = focus_dist;
         io_worker.push(std::move(fd));
 
         fb.clear(); fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);

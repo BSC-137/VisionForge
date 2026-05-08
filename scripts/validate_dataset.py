@@ -307,6 +307,34 @@ def validate_meta_json(path: Path) -> list[Issue]:
         if key not in obj:
             issues.append(Issue("error", "meta_schema", f"Missing required field '{key}'.", str(path)))
 
+    for key in ("camera_extrinsics", "camera_intrinsics", "convention"):
+        if key not in obj:
+            issues.append(Issue("error", "meta_schema", f"Missing required field '{key}'.", str(path)))
+
+    if "camera_extrinsics" in obj:
+        ce = obj["camera_extrinsics"]
+        if not isinstance(ce, list) or len(ce) != 16:
+            issues.append(Issue("error", "meta_schema", "camera_extrinsics must be a list of 16 floats.", str(path)))
+        else:
+            for i, v in enumerate(ce):
+                if not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+                    issues.append(
+                        Issue("error", "meta_schema", f"camera_extrinsics[{i}] must be a finite number.", str(path))
+                    )
+
+    if "camera_intrinsics" in obj:
+        ci = obj["camera_intrinsics"]
+        if not isinstance(ci, dict):
+            issues.append(Issue("error", "meta_schema", "camera_intrinsics must be an object.", str(path)))
+        else:
+            for ik in ("fx", "fy", "cx", "cy"):
+                if ik not in ci:
+                    issues.append(Issue("error", "meta_schema", f"camera_intrinsics missing '{ik}'.", str(path)))
+                elif not isinstance(ci[ik], (int, float)) or not math.isfinite(float(ci[ik])):
+                    issues.append(
+                        Issue("error", "meta_schema", f"camera_intrinsics.{ik} must be a finite number.", str(path))
+                    )
+
     if "frame_id" in obj and not _is_integral_number(obj["frame_id"]):
         issues.append(Issue("error", "meta_schema", "frame_id must be an integral number.", str(path)))
     if "split" in obj and not isinstance(obj["split"], str):
@@ -325,6 +353,50 @@ def validate_meta_json(path: Path) -> list[Issue]:
         issues.append(Issue("error", "meta_schema", "Missing required field 'objects'.", str(path)))
     elif not isinstance(obj["objects"], list):
         issues.append(Issue("error", "meta_schema", "objects must be an array.", str(path)))
+    else:
+        for oi, ob in enumerate(obj["objects"]):
+            if not isinstance(ob, dict):
+                issues.append(Issue("error", "meta_schema", f"objects[{oi}] must be an object.", str(path)))
+                continue
+            for ok in ("instance_id", "local_to_world_row_major", "position", "rotation_deg", "scale"):
+                if ok not in ob:
+                    issues.append(
+                        Issue("error", "meta_schema", f"objects[{oi}] missing '{ok}'.", str(path))
+                    )
+            if "local_to_world_row_major" in ob:
+                lw = ob["local_to_world_row_major"]
+                if not isinstance(lw, list) or len(lw) != 16:
+                    issues.append(
+                        Issue(
+                            "error",
+                            "meta_schema",
+                            f"objects[{oi}].local_to_world_row_major must have length 16.",
+                            str(path),
+                        )
+                    )
+                else:
+                    for li, lv in enumerate(lw):
+                        if not isinstance(lv, (int, float)) or not math.isfinite(float(lv)):
+                            issues.append(
+                                Issue(
+                                    "error",
+                                    "meta_schema",
+                                    f"objects[{oi}].local_to_world_row_major[{li}] must be finite.",
+                                    str(path),
+                                )
+                            )
+            for ak, alen in (("position", 3), ("rotation_deg", 3), ("scale", 3)):
+                if ak in ob:
+                    arr = ob[ak]
+                    if not isinstance(arr, list) or len(arr) != alen:
+                        issues.append(
+                            Issue(
+                                "error",
+                                "meta_schema",
+                                f"objects[{oi}].{ak} must be a list of length {alen}.",
+                                str(path),
+                            )
+                        )
 
     return issues
 

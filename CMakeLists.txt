@@ -136,9 +136,12 @@ if(VISIONFORGE_TESTS)
     "VF_ENGINE_VERSION_STR=\"test\""
     "VF_GIT_COMMIT_STR=\"unknown\""
   )
+  add_executable(test_meta_pose tests/test_meta_pose.cpp)
+  target_link_libraries(test_meta_pose PRIVATE visionforge)
   enable_testing()
   add_test(NAME world_config COMMAND test_world_config)
   add_test(NAME dataset_manifest COMMAND test_dataset_manifest)
+  add_test(NAME meta_pose COMMAND test_meta_pose)
 endif()
 
 set(CPACK_PACKAGE_NAME "visionforge")
