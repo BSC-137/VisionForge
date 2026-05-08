@@ -23,7 +23,7 @@
 * **Materials**: PBR (metallic/roughness), Lambertian diffuse, dielectric, metal, emissive area lights
 * **Adaptive sampling** with Welford variance and 95% confidence interval early termination
 * **OpenMP parallelization** across all render paths
-* **`manifest.json` (schema `1`)**: written once per dataset export (`forge`, `scenario`, or legacy CLI directory mode). Captures engine and Git identifiers (best-effort), schema version (`vf::k_manifest_schema_version`), the argv/CWD/timestamp used for the run, RNG semantics notes for reproducibility, the resolved world config as canonical JSON (optional SHA-256), OpenMP thread hints (best-effort), dataset split/layout metadata, and a stable `dataset_id` hex fingerprint for indexing. CPU model and thread fields may be absent or approximate; manifest write failures are logged loudly and never abort rendering.
+* **`manifest.json` (schema `2`)**: written once per dataset export (`forge`, `scenario`, or legacy mode) **or** once per shard as `manifest_shard_K.json` when using `--num-shards` > 1. Captures engine and Git identifiers (best-effort), schema version (`vf::k_manifest_schema_version`), the argv/CWD/timestamp used for the run, RNG semantics notes for reproducibility (including global frame index for `vf_rng`), the resolved world config as canonical JSON (optional SHA-256), OpenMP thread hints (best-effort), dataset split/layout metadata (including optional `shard` / `frames_rendered_this_process`), and a stable `dataset_id` hex fingerprint for indexing. CPU model and thread fields may be absent or approximate; manifest write failures are logged loudly and never abort rendering.
 
 ---
 
@@ -131,14 +131,18 @@ The `forge` subcommand generates labeled training data at scale with full domain
 | `frame_XXXX_spatial.exr` | G-Buffer EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z` (float32) |
 | `frame_XXXX_meta.json` | Frame metadata: `camera_extrinsics` (16 floats, **c2w** row-major), `camera_intrinsics` (`fx`,`fy`,`cx`,`cy`, vertical `vfov_deg`), legacy `camera` block, sun, and `objects[]` with full `rotation_deg` / `scale`, `local_to_world_row_major`, `grounding_constraint`, `terrain_normal`, `transform_supervision` |
 
-The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (instead of `frame_XXXX`) and writes `scenario_coco.json` at the dataset root.
+The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (instead of `frame_XXXX`) and writes `scenario_coco.json` at the dataset root (or `scenario_coco_shard_K.json` when sharding).
 
 ### Meta / pose convention (`*_meta.json`)
 
 - **`camera_extrinsics`**: row-major \(4 \times 4\) **camera-to-world** transform \(P_{\mathrm{world}} = M \, P_{\mathrm{cam}}\) (homogeneous column). Rotation columns in world space follow an OpenCV-style right-handed camera: **+X** = renderer `Camera::u` (right), **+Y** = \(-\) `Camera::v` (image \(t\) increases along \(+v\), so “down” in pixels aligns with \(+v\) in world), **+Z** = \(-\) `Camera::w` (forward into the scene; `w = normalize(lookfrom - lookat)`). Translation is `Camera::origin` (`lookfrom`). Derived from the same `Camera` instance used for `get_ray`, not a recomputed look-at.
-- **`camera_intrinsics`**: pinhole **\(f_x, f_y, c_x, c_y\)** chosen so pixel \((i,j)\) maps to `get_ray`’s \((s,t) = (i/\max(W-1,1),\, j/\max(H-1,1))\), with \(c_x=(W-1)/2\), \(c_y=(H-1)/2\). `fov_deg` in `camera` is **vertical** FOV (same as `vfov_deg` in intrinsics). Use `skew: 0`.
+- **`camera_intrinsics`**: pinhole **\(f_x, f_y, c_x, c_y\)** chosen so pixel \((i,j)\) maps to `get_ray`’s \((s,t) = (i/\max(W-1,1),\, j/\max(H-1,1))\), with \(c_x=(W-1)/2\), \(c_y=(H-1)/2\). `fov_deg` in `camera` is **vertical** FOV (same as `vfov_deg` in intrinsics). Use `skew: 0`. When projecting a 3D point with \(\mathbf{P}_c=\mathrm{w2c}\,\mathbf{P}_w\), use \(u = f_x X_c/Z_c + c_x\) and \(v = -f_y Y_c/Z_c + c_y\) (v grows downward, matching the `Camera::get_ray` / `meta_pose` tests).
 - **Objects**: `instance_id` matches G-buffer / EXR **`InstanceID`**. `local_to_world_row_major` encodes **logical** pose \(R_z R_y R_x \,\mathrm{diag}(s)\) plus translation from `SceneNode::world_transform`, matching Euler order in `flat_pack` **before** terrain **slope alignment** and **vertex snap** on grounded assets. When `grounding_constraint` is true, `transform_supervision` is `logical_excludes_slope_and_vertex_snap`; use rasterized labels / EXR for exact silhouette supervision.
-- **`validate_dataset.py --check-meta`** expects the fields above. Older datasets without `camera_extrinsics` will fail this check until re-rendered.
+- **`validate_dataset.py --check-meta`** expects the fields above. Older datasets without `camera_extrinsics` will fail this check until re-rendered. Run validation **after** merging shard outputs if you split COCO across `annotations_coco_shard_*.json` (see **Deterministic sharding**).
+
+### Python loader (`python/visionforge_loader`)
+
+A small **PyTorch**-first package (`pip install ./python/visionforge_loader`) loads `train/` / `val/` frames, parses `*_meta.json` + `*_spatial.exr`, and includes pytest checks that **world ↔ image projection** matches this README. See `python/visionforge_loader/README.md` and `python -m visionforge_loader.cli_projection_smoke`.
 
 ### Domain randomization parameters (`world.json`)
 
@@ -427,8 +431,12 @@ Forge has a focused CLI that layers on top of `world.json`. JSON provides the de
 | `--ground-tex` | Override triplanar ground texture path |
 | `--ground-scale` | Override triplanar UV scale |
 | `--verbose` | Print per-frame grounding logs (asset label, snap-Y, normal, sink) |
+| `--shard-id` | Distributed sharding: this worker renders global frame `g` only when `g % num_shards == shard_id` (default `0`) |
+| `--num-shards` | Shard count `W ≥ 1`. Each process still iterates all `g ∈ [0, frames)` so domain-randomization `std::mt19937` matches a single run; path tracer uses `vf_rng` seed `render.seed + g`. With `W>1`, writes `manifest_shard_{id}.json` and `annotations_coco_shard_{id}.json`. Merge COCO with `scripts/merge_coco_shards.py`. |
 
-Every forged frame:
+### Deterministic sharding
+
+Use the same `world.json`, `--frames F`, `--shard-id K`, and `--num-shards W` on each worker. **Global** indices appear in filenames (`frame_0007` is always frame 7). Train/val split is based on `g`, not a per-shard counter. Pixel-identical output for frame `g` is reproduced whether rendered in one process (`W=1`) or on the shard that owns `g`.
 
 - Uses **semantic grounding** (heightfield raycast, slope-aligned up vector, and randomized “sink” depth) for whichever asset is sampled.
 - Draws terrain with either the analytic sand material or the triplanar ground texture.

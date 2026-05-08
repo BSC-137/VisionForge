@@ -144,7 +144,10 @@ json random_seed_json(const DatasetManifestParams& p) {
         {"render_config_seed", p.render_seed},
         {"thread_rng_per_row_legacy_preview",
          "Inside some preview/lighting-only paths each scanline calls vf_rng::seed_thread_rng(row_mix + constant); "
-         "forge/scenario dataset frames use seed_thread_rng(uint64_t(render_config_seed) + frame_index)."},
+         "forge/scenario dataset frames use seed_thread_rng(uint64_t(render_config_seed) + global_frame_index). "
+         "With --num-shards W>1, the implementation iterates global g in [0, F) every run (std::mt19937 draws match a "
+         "single-process run), skips rendering when g % W != shard_index, and seeds vf_rng with g (not a per-shard "
+         "local counter)."},
         {"random_double_source", "vf_rng thread-local xoshiro256+ (see vec3.hpp)."},
     };
     if (!p.dataset_rng_note.empty()) seed_doc["dataset_domain_randomization"] = p.dataset_rng_note;
@@ -155,21 +158,33 @@ json dataset_layout_json(const DatasetManifestParams& p) {
     json d = {{"job_kind", p.job_kind},
               {"dataset_root", p.dataset_root},
               {"frames_total", p.frames_total},
+              {"frames_total_global", p.frames_total},
+              {"frames_rendered_this_process", p.frames_rendered_this_process},
               {"train_frames", p.train_frames},
               {"val_frames", p.val_frames},
               {"train_subdirectory", "train"},
               {"val_subdirectory", "val"},
-              {"forge_io_had_error", p.forge_io_had_error}};
+              {"forge_io_had_error", p.forge_io_had_error},
+              {"shard", json{{"index", p.shard_index}, {"count", p.shard_count}}},
+              {"sharding_scheme",
+               "global_frame_index g in [0, frames_total) rendered on shard k iff g % shard.count == shard.index; "
+               "domain-randomization RNG advances for every g on every process."}};
     if (p.active_scenario) d["active_scenario"] = *p.active_scenario;
 
     if (p.job_kind == "forge") {
         d["rgb_stem_pattern"] = "frame_%04d";
         d["sidecar_suffixes"] = json::array({".png", "_spatial.exr", "_meta.json", ".txt"});
-        d["coco_annotations_file"] = "annotations_coco.json";
+        if (p.shard_count > 1)
+            d["coco_annotations_file"] = "annotations_coco_shard_" + std::to_string(p.shard_index) + ".json";
+        else
+            d["coco_annotations_file"] = "annotations_coco.json";
     } else if (p.job_kind == "scenario") {
         d["rgb_stem_pattern"] = "sfrm_%04d";
         d["sidecar_suffixes"] = json::array({".png", "_spatial.exr", "_meta.json", ".txt"});
-        d["coco_annotations_file"] = "scenario_coco.json";
+        if (p.shard_count > 1)
+            d["coco_annotations_file"] = "scenario_coco_shard_" + std::to_string(p.shard_index) + ".json";
+        else
+            d["coco_annotations_file"] = "scenario_coco.json";
     }
     return d;
 }

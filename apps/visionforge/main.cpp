@@ -680,7 +680,22 @@ struct ForgeCli {
 
     // Scenario name
     std::string scenario_name = "";
+
+    /// Sharding: render global frame g iff g % num_shards == shard_id (see manifest dataset_layout.sharding_scheme).
+    int shard_id = 0;
+    int num_shards = 1;
 };
+
+static void validate_sharding_or_exit(int shard_id, int num_shards) {
+    if (num_shards < 1) {
+        std::cerr << "forge/scenario: --num-shards must be >= 1\n";
+        std::exit(2);
+    }
+    if (shard_id < 0 || shard_id >= num_shards) {
+        std::cerr << "forge/scenario: --shard-id must satisfy 0 <= --shard-id < --num-shards\n";
+        std::exit(2);
+    }
+}
 
 static void print_forge_usage() {
     std::cout <<
@@ -688,6 +703,12 @@ R"(VisionForge Forge — synthetic dataset generator
 
 Usage:
   visionforge forge --config world.json --frames 100
+
+Sharding (optional, same machine or distributed workers):
+  --shard-id K --num-shards W    Each process walks all global frame indices g in [0, F) but only renders
+                                 when g % W == K (PNG/EXR/meta use frame_%04d with g). Domain-randomization
+                                 RNG matches a single-process run; path-tracer vf_rng uses seed + g.
+  With W>1, writes manifest_shard_K.json and annotations_coco_shard_K.json (merge after all shards finish).
 )";
 }
 
@@ -706,6 +727,8 @@ static ForgeCli parse_forge_cli(int argc, char** argv) {
         else if (a == "--ground-tex" && i + 1 < argc) cli.ground_tex = argv[++i];
         else if (a == "--ground-scale" && i + 1 < argc) cli.ground_scale = std::stod(argv[++i]);
         else if (a == "--verbose") cli.verbose = true;
+        else if (a == "--shard-id" && i + 1 < argc) cli.shard_id = std::stoi(argv[++i]);
+        else if (a == "--num-shards" && i + 1 < argc) cli.num_shards = std::stoi(argv[++i]);
         else if (a == "--help" || a == "-h") {
             print_forge_usage();
             std::exit(0);
@@ -729,6 +752,9 @@ R"(VisionForge Scenario — deterministic synthetic generation
 
 Usage:
   visionforge scenario --config world.json --name "MyScenario" --frames 100
+
+Sharding: same as forge (--shard-id K --num-shards W). With W>1 writes manifest_shard_K.json and
+scenario_coco_shard_K.json.
 )";
 }
 
@@ -747,6 +773,8 @@ static ForgeCli parse_scenario_cli(int argc, char** argv) {
         else if (a == "--ground-tex" && i + 1 < argc) cli.ground_tex = argv[++i];
         else if (a == "--ground-scale" && i + 1 < argc) cli.ground_scale = std::stod(argv[++i]);
         else if (a == "--verbose") cli.verbose = true;
+        else if (a == "--shard-id" && i + 1 < argc) cli.shard_id = std::stoi(argv[++i]);
+        else if (a == "--num-shards" && i + 1 < argc) cli.num_shards = std::stoi(argv[++i]);
         else if (a == "--help" || a == "-h") {
             print_scenario_usage();
             std::exit(0);
@@ -1117,6 +1145,7 @@ static void write_coco_fast(const std::string& path, const CocoWriter& coco) {
 
 static int run_forge_subcommand(int argc, char** argv) {
     ForgeCli cli = parse_forge_cli(argc, argv);
+    validate_sharding_or_exit(cli.shard_id, cli.num_shards);
     WorldConfig cfg = load_world_config(cli.config_path, {.strict = true});
 
     // --- Bun-style CLI Overrides ---
@@ -1216,8 +1245,9 @@ static int run_forge_subcommand(int argc, char** argv) {
 
     ForgeIOWorker io_worker;
     double total_render_ms = 0.0;
+    int frames_rendered = 0;
 
-    for (int frame = 0; frame < cli.frames; ++frame) {
+    for (int g = 0; g < cli.frames; ++g) {
         Vec3 lookfrom = sample_range(dr_rng, cfg.camera.lookfrom);
         double fov = sample_range(dr_rng, cfg.camera.fov_deg);
         double sun_az = sample_range(dr_rng, cfg.lighting.sun_azimuth_deg);
@@ -1258,10 +1288,12 @@ static int run_forge_subcommand(int argc, char** argv) {
 
         double obj_y = node->world_transform.position.y;
 
+        if (cli.num_shards > 1 && (g % cli.num_shards) != cli.shard_id) continue;
+
         // --- Mathematical Verification Log ---
         if (cli.verbose) {
             std::printf("[FRAME %04d] Asset: %s | Snap-Y: %.2f | Normal: (%.2f, %.2f, %.2f) | Sink: %.2f\n",
-                        frame,
+                        g,
                         asset.config.label.c_str(),
                         obj_y,
                         terrain_sample.normal.x,
@@ -1270,11 +1302,10 @@ static int run_forge_subcommand(int argc, char** argv) {
                         frame_sink);
         }
 
-
         const double focus_dist = (lookfrom - cfg.camera.lookat).length();
         Camera cam(lookfrom, cfg.camera.lookat, cfg.camera.up, fov, aspect, 0.0, focus_dist, 0.0, 1.0);
 
-        vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(frame));
+        vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(g));
         gbuf.clear();
         auto t_render_start = std::chrono::high_resolution_clock::now();
         int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, true);
@@ -1283,13 +1314,13 @@ static int run_forge_subcommand(int argc, char** argv) {
         double render_ms = std::chrono::duration<double, std::milli>(t_render_end - t_render_start).count();
         total_render_ms += render_ms;
 
-        const bool is_train = (frame < train_count);
+        const bool is_train = (g < train_count);
         const std::string& split_dir = is_train ? train_dir : val_dir;
         char stem_buf[32];
-        std::snprintf(stem_buf, sizeof(stem_buf), "frame_%04d", frame);
+        std::snprintf(stem_buf, sizeof(stem_buf), "frame_%04d", g);
 
         ForgeFrameData fd;
-        fd.frame_id = frame; fd.width = o.width; fd.height = o.height;
+        fd.frame_id = g; fd.width = o.width; fd.height = o.height;
         fd.avg_spp = avg_spp; fd.is_train = is_train; fd.split_dir = split_dir; fd.stem = stem_buf;
         fd.fb = std::move(fb); fd.gbuf = std::move(gbuf);
         fd.lookfrom = lookfrom; fd.lookat = cfg.camera.lookat; fd.up = cfg.camera.up; fd.fov = fov;
@@ -1308,7 +1339,7 @@ static int run_forge_subcommand(int argc, char** argv) {
         fo.terrain_normal = node->terrain_normal;
         fd.objects.push_back(fo);
 
-        fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
+        fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)g;
         fd.cam_origin = cam.origin;
         fd.cam_u = cam.u;
         fd.cam_v = cam.v;
@@ -1322,11 +1353,18 @@ static int run_forge_subcommand(int argc, char** argv) {
         gbuf = GBuffer(o.width, o.height);
 
         if (cli.verbose) {
-            std::cout << "Frame " << (frame + 1) << "/" << cli.frames << "  render=" << (int)render_ms << "ms\n";
+            std::cout << "Frame " << (g + 1) << "/" << cli.frames << "  render=" << (int)render_ms << "ms\n";
         }
+        ++frames_rendered;
     }
 
-    std::cout << "Rendering done. Avg render: " << (int)(total_render_ms / cli.frames) << "ms/frame. Flushing I/O...\n";
+    if (frames_rendered > 0)
+        std::cout << "Rendering done (" << frames_rendered << " frames). Avg render: "
+                  << (int)(total_render_ms / frames_rendered)
+                  << "ms/frame. Flushing I/O...\n";
+    else
+        std::cout << "No frames assigned to this shard (--shard-id " << cli.shard_id << " / --num-shards "
+                  << cli.num_shards << "). Flushing I/O...\n";
     io_worker.drain();
 
     {
@@ -1343,22 +1381,33 @@ static int run_forge_subcommand(int argc, char** argv) {
         mp.dataset_root = cfg.dataset.root;
         mp.render_seed = cfg.render.seed;
         mp.dataset_rng_note =
-            "std::mt19937 domain_randomization_rng uses cfg.render.seed XOR 0x9e3779b9u for placement/light/asset "
+            "std::mt19937 domain_randomization_rng uses cfg.render.seed XOR 0x9e3779b1u for placement/light/asset "
             "sampling (see run_forge_subcommand). "
-            "Each rendered frame calls vf_rng::seed_thread_rng(uint64_t(cfg.render.seed) + frame_index).";
+            "Each rendered frame calls vf_rng::seed_thread_rng(uint64_t(cfg.render.seed) + global_frame_index g).";
+        mp.shard_index                   = cli.shard_id;
+        mp.shard_count                   = cli.num_shards;
+        mp.frames_rendered_this_process  = frames_rendered;
         mp.forge_io_had_error = io_worker.had_error();
-        if (cli.frames > 0)
-            mp.render_summary["avg_render_ms_per_frame"] = total_render_ms / double(cli.frames);
-        vf::write_dataset_manifest_atomic(std::filesystem::path(cfg.dataset.root) / "manifest.json", mp);
+        if (frames_rendered > 0) mp.render_summary["avg_render_ms_per_frame"] = total_render_ms / double(frames_rendered);
+        const std::filesystem::path manifest_path =
+            cli.num_shards > 1 ? (std::filesystem::path(cfg.dataset.root) /
+                                  ("manifest_shard_" + std::to_string(cli.shard_id) + ".json"))
+                               : (std::filesystem::path(cfg.dataset.root) / "manifest.json");
+        vf::write_dataset_manifest_atomic(manifest_path, mp);
     }
 
-    write_coco_fast(cfg.dataset.root + "/annotations_coco.json", io_worker.coco());
+    const std::string coco_path =
+        cfg.dataset.root + "/" +
+        (cli.num_shards > 1 ? ("annotations_coco_shard_" + std::to_string(cli.shard_id) + ".json")
+                            : "annotations_coco.json");
+    write_coco_fast(coco_path, io_worker.coco());
 
     return 0;
 }
 
 static int run_scenario_subcommand(int argc, char** argv) {
     ForgeCli cli = parse_scenario_cli(argc, argv);
+    validate_sharding_or_exit(cli.shard_id, cli.num_shards);
     WorldConfig cfg = load_world_config(cli.config_path, {.strict = true});
 
     // Apply basic flags as run_forge does
@@ -1439,8 +1488,8 @@ static int run_scenario_subcommand(int argc, char** argv) {
     HittableList frame_world;
     ForgeIOWorker io_worker;
     double total_render_ms = 0.0;
-    
-    // Scene node builder
+    int frames_rendered = 0;
+
     std::function<std::shared_ptr<SceneNode>(const WorldConfig::NodeEntry&)> build_node;
     build_node = [&](const WorldConfig::NodeEntry& entry) -> std::shared_ptr<SceneNode> {
         auto n = std::make_shared<SceneNode>(entry.name);
@@ -1466,7 +1515,7 @@ static int run_scenario_subcommand(int argc, char** argv) {
         root_node->add_child(build_node(ne));
     }
 
-    for (int frame = 0; frame < cli.frames; ++frame) {
+    for (int g = 0; g < cli.frames; ++g) {
         double sun_az = sample_range(dr_rng, cfg.lighting.sun_azimuth_deg);
         double sun_el = sample_range(dr_rng, cfg.lighting.sun_elevation_deg);
         g_sky.set_angles(sun_az, sun_el);
@@ -1517,30 +1566,32 @@ static int run_scenario_subcommand(int argc, char** argv) {
 
         root_node->flat_pack(frame_world);
 
+        if (cli.num_shards > 1 && (g % cli.num_shards) != cli.shard_id) continue;
+
         const double focus_dist = (active_scenario->camera.lookfrom.max - active_scenario->camera.lookat).length();
         Vec3 lf = active_scenario->camera.lookfrom.max;
         double c_fov = active_scenario->camera.fov_deg.max;
         Camera cam(lf, active_scenario->camera.lookat, active_scenario->camera.up, c_fov, aspect, 0.0, focus_dist, 0.0, 1.0);
 
-        vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(frame));
+        vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(g));
         gbuf.clear();
         auto t0 = std::chrono::high_resolution_clock::now();
         int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, true);
         double render_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
         total_render_ms += render_ms;
-        if (cli.verbose) std::cout << "Scenario Frame " << (frame + 1) << "/" << cli.frames << " " << (int)render_ms << "ms\n";
+        if (cli.verbose) std::cout << "Scenario Frame " << (g + 1) << "/" << cli.frames << " " << (int)render_ms << "ms\n";
 
-        const bool is_train = (frame < train_count);
-        char stem_buf[32]; std::snprintf(stem_buf, sizeof(stem_buf), "sfrm_%04d", frame);
+        const bool is_train = (g < train_count);
+        char stem_buf[32]; std::snprintf(stem_buf, sizeof(stem_buf), "sfrm_%04d", g);
         
         ForgeFrameData fd;
-        fd.frame_id = frame; fd.width = o.width; fd.height = o.height;
+        fd.frame_id = g; fd.width = o.width; fd.height = o.height;
         fd.avg_spp = avg_spp; fd.is_train = is_train; fd.split_dir = is_train ? train_dir : val_dir; fd.stem = stem_buf;
         fd.fb = std::move(fb); fd.gbuf = std::move(gbuf);
         fd.lookfrom = lf; fd.lookat = active_scenario->camera.lookat; fd.up = active_scenario->camera.up; fd.fov = c_fov;
         fd.sun_az = sun_az; fd.sun_el = sun_el;
         fd.objects = std::move(frame_objs);
-        fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)frame;
+        fd.spp_target = o.spp; fd.max_depth = o.max_depth; fd.seed = o.seed + (unsigned)g;
         fd.cam_origin = cam.origin;
         fd.cam_u = cam.u;
         fd.cam_v = cam.v;
@@ -1550,6 +1601,7 @@ static int run_scenario_subcommand(int argc, char** argv) {
 
         fb.clear(); fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
         gbuf = GBuffer(o.width, o.height);
+        ++frames_rendered;
     }
 
     io_worker.drain();
@@ -1571,14 +1623,24 @@ static int run_scenario_subcommand(int argc, char** argv) {
         mp.dataset_rng_note =
             "std::mt19937 domain_randomization_rng uses cfg.render.seed XOR 0xabcdef12u for lighting/material DR "
             "(see run_scenario_subcommand). "
-            "Each rendered frame calls vf_rng::seed_thread_rng(uint64_t(cfg.render.seed) + frame_index).";
+            "Each rendered frame calls vf_rng::seed_thread_rng(uint64_t(cfg.render.seed) + global_frame_index g).";
+        mp.shard_index                  = cli.shard_id;
+        mp.shard_count                  = cli.num_shards;
+        mp.frames_rendered_this_process = frames_rendered;
         mp.forge_io_had_error = io_worker.had_error();
-        if (cli.frames > 0)
-            mp.render_summary["avg_render_ms_per_frame"] = total_render_ms / double(cli.frames);
-        vf::write_dataset_manifest_atomic(std::filesystem::path(cfg.dataset.root) / "manifest.json", mp);
+        if (frames_rendered > 0)
+            mp.render_summary["avg_render_ms_per_frame"] = total_render_ms / double(frames_rendered);
+        const std::filesystem::path manifest_path =
+            cli.num_shards > 1 ? (std::filesystem::path(cfg.dataset.root) /
+                                  ("manifest_shard_" + std::to_string(cli.shard_id) + ".json"))
+                               : (std::filesystem::path(cfg.dataset.root) / "manifest.json");
+        vf::write_dataset_manifest_atomic(manifest_path, mp);
     }
 
-    write_coco_fast(cfg.dataset.root + "/scenario_coco.json", io_worker.coco());
+    const std::string scenario_coco_path =
+        cfg.dataset.root + "/" +
+        (cli.num_shards > 1 ? ("scenario_coco_shard_" + std::to_string(cli.shard_id) + ".json") : "scenario_coco.json");
+    write_coco_fast(scenario_coco_path, io_worker.coco());
     return 0;
 }
 

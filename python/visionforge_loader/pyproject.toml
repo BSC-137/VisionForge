@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visionforge-loader"
+version = "0.1.0"
+description = "Load VisionForge forge/scenario datasets and validate camera projection math."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=1.24",
+  "torch>=2.0",
+  "pillow>=10.0",
+  "OpenEXR>=3.2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+visionforge-projection-smoke = "visionforge_loader.cli_projection_smoke:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["visionforge_loader*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

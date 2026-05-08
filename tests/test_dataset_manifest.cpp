@@ -88,7 +88,7 @@ static bool test_manifest_write_atomic() {
     std::ifstream in(dest);
     nlohmann::json doc;
     in >> doc;
-    if (!doc.contains("version_info") || doc["version_info"]["schema_version"] != vf::k_manifest_schema_version) {
+    if (!doc.contains("version_info") || doc["version_info"]["schema_version"].get<std::string>() != vf::k_manifest_schema_version) {
         std::cerr << "FAIL: manifest schema_version\n";
         return false;
     }
