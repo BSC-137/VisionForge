@@ -10,7 +10,7 @@
 * **Forge data factory**: `visionforge forge` generates thousands of labeled frames with full domain randomization from a single JSON config
 * **Async I/O pipeline**: dedicated background thread writes PNG, EXR, YOLO, and COCO while the next frame renders
 * **Thread-local xoshiro256+ PRNG**: zero-contention random number generation across OpenMP threads
-* **G-Buffer export**: per-pixel depth, world-space normals, and instance IDs as 32-bit float OpenEXR
+* **G-Buffer export**: per-pixel depth, **InstanceID**, and world-space normals in one multi-channel OpenEXR (`Depth`, `InstanceID`, `Normal.X/Y/Z`; all float32—instance ids round-trip exactly when ≤ 16,777,215)
 * **One-pass labeling**: bounding boxes computed from the G-Buffer in a single scan, feeding YOLO `.txt`, COCO `.json`, CSV, and JSON simultaneously
 * **BVH acceleration** with longest-extent axis splitting over all scene primitives
 * **Phase 8 textures without Phase 7 slowdown**: UVs (and normal-map TBN basis) are computed lazily *only when* a material actually has textures bound
@@ -127,7 +127,7 @@ The `forge` subcommand generates labeled training data at scale with full domain
 | File | Description |
 |------|-------------|
 | `frame_XXXX.png` | PBR-rendered RGB |
-| `frame_XXXX_spatial.exr` | G-Buffer: depth, normals, instance IDs |
+| `frame_XXXX_spatial.exr` | G-Buffer EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z` (float32) |
 | `frame_XXXX_meta.json` | Full randomized state (camera, sun, materials, transforms) |
 | `frame_XXXX.txt` | YOLO labels (class, cx, cy, w, h — normalized) |
 
@@ -311,8 +311,8 @@ The default path renders a single scene with labeled cubes and optional OBJ mesh
 | File | Description |
 |------|-------------|
 | `image.ppm`, `image.png` | Tonemapped RGB (ACES + sqrt gamma) |
-| `gbuffer.exr` | 32-bit float EXR: Depth + Normal.X/Y/Z (with `--exr`) |
-| `inst.pgm` | Per-pixel instance mask |
+| `gbuffer.exr` | 32-bit float EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z` (with `--exr`) |
+| `inst.pgm` | Per-pixel instance mask (8-bit; ids above 255 clamped—use EXR `InstanceID` for full precision) |
 | `labels_yolo.txt` | YOLO-format labels |
 | `labels_coco.json` | COCO annotations |
 | `bboxes.csv`, `bboxes.json` | Bounding boxes from G-Buffer |
@@ -340,7 +340,7 @@ The default path renders a single scene with labeled cubes and optional OBJ mesh
 | `--seed` | `1337` | RNG seed |
 | `--exposure` | `6.5` | Exposure multiplier |
 | `--sky-gain` | `45` | Sky brightness |
-| `--exr` | off | Write G-Buffer EXR |
+| `--exr` | off | Write `gbuffer.exr` (`Depth`, `InstanceID`, `Normal.X/Y/Z`) |
 | `--depth-only` | off | Primary-ray pass only (implies `--exr`) |
 
 ### Camera

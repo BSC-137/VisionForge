@@ -7,6 +7,7 @@
 #include <tinyexr.h>
 
 #include <cstring>
+#include <vector>
 #include "visionforge/exr_writer.hpp"
 #include "visionforge/passes.hpp"
 
@@ -85,7 +86,14 @@ bool write_float_exr(const char* path, int w, int h, const std::vector<float>& i
 bool write_gbuffer_exr(const char* path, const GBuffer& gbuf) {
     const int w = gbuf.width;
     const int h = gbuf.height;
-    constexpr int NC = 4;
+    const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+    constexpr int NC = 5;
+
+    // Per-pixel instance id as float32. Values are exact integers for ids <= 2^24 - 1 (16777215);
+    // larger uint32_t ids may not round-trip through IEEE-754 float.
+    std::vector<float> instance_id_f(n);
+    for (size_t i = 0; i < n; ++i)
+        instance_id_f[i] = static_cast<float>(gbuf.inst_id[i]);
 
     EXRHeader header; InitEXRHeader(&header);
     EXRImage image;   InitEXRImage(&image);
@@ -93,10 +101,11 @@ bool write_gbuffer_exr(const char* path, const GBuffer& gbuf) {
     image.width  = w;
     image.height = h;
 
-    // TinyEXR requires channels sorted alphabetically
-    // Depth < Normal.X < Normal.Y < Normal.Z
+    // TinyEXR requires channels sorted alphabetically by name.
+    // Depth, InstanceID, Normal.X, Normal.Y, Normal.Z
     float* ch_ptrs[NC] = {
         const_cast<float*>(gbuf.depth.data()),
+        instance_id_f.data(),
         const_cast<float*>(gbuf.normal_x.data()),
         const_cast<float*>(gbuf.normal_y.data()),
         const_cast<float*>(gbuf.normal_z.data()),
@@ -106,9 +115,10 @@ bool write_gbuffer_exr(const char* path, const GBuffer& gbuf) {
     header.num_channels = NC;
     header.channels = (EXRChannelInfo*)malloc(sizeof(EXRChannelInfo) * NC);
     std::strcpy(header.channels[0].name, "Depth");
-    std::strcpy(header.channels[1].name, "Normal.X");
-    std::strcpy(header.channels[2].name, "Normal.Y");
-    std::strcpy(header.channels[3].name, "Normal.Z");
+    std::strcpy(header.channels[1].name, "InstanceID");
+    std::strcpy(header.channels[2].name, "Normal.X");
+    std::strcpy(header.channels[3].name, "Normal.Y");
+    std::strcpy(header.channels[4].name, "Normal.Z");
 
     header.pixel_types           = (int*)malloc(sizeof(int) * NC);
     header.requested_pixel_types = (int*)malloc(sizeof(int) * NC);
