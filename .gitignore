@@ -44,8 +44,8 @@ surface_*.png
 *.la
 *.lo
 
-# Executables
-visionforge
+# Root build product only; unanchored "visionforge" would ignore include/visionforge/
+/visionforge
 *.exe
 *.out
 *.app
