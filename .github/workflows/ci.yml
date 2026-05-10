@@ -15,7 +15,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build zlib1g-dev libomp-dev
+          # ninja + zlib for CMake. Do NOT use "libopenmp-dev" — it does not exist on Ubuntu.
+          # GNU OpenMP (-fopenmp / libgomp) comes with the preinstalled g++ image; no extra apt package.
+          sudo apt-get install -y ninja-build zlib1g-dev
 
       - name: Configure & build (Release + OpenMP)
         run: |
