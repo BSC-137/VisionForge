@@ -142,6 +142,17 @@ if(VISIONFORGE_TESTS)
   add_test(NAME world_config COMMAND test_world_config)
   add_test(NAME dataset_manifest COMMAND test_dataset_manifest)
   add_test(NAME meta_pose COMMAND test_meta_pose)
+
+  # CLI sanity (no assets): exit 0 on --help, non-zero on unknown flags
+  add_test(NAME visionforge_cli_help COMMAND $<TARGET_FILE:visionforge_app> --help)
+  set_tests_properties(visionforge_cli_help PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME visionforge_forge_help COMMAND $<TARGET_FILE:visionforge_app> forge --help)
+  set_tests_properties(visionforge_forge_help PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  add_test(NAME visionforge_cli_bad_flag COMMAND $<TARGET_FILE:visionforge_app> --totally-unknown-flag-for-ctest)
+  set_tests_properties(visionforge_cli_bad_flag PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    WILL_FAIL TRUE
+  )
 endif()
 
 set(CPACK_PACKAGE_NAME "visionforge")

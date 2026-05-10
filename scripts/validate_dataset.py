@@ -812,6 +812,19 @@ def run_validation(args: argparse.Namespace) -> ValidationReport:
     return report
 
 
+def run_validation_cli(argv: list[str]) -> tuple[ValidationReport, int]:
+    """
+    Parse argv like the CLI (entries corresponding to sys.argv[1:]), run validation,
+    and return ``(report, exit_code)`` with the same semantics as :func:`main` (0/1).
+
+    Caller must ensure ``--dataset-root`` exists and is a directory; :func:`main` performs
+    those checks before calling validation.
+    """
+    args = parse_args(argv)
+    report = run_validation(args)
+    return report, exit_code_for(report, args.strict)
+
+
 def exit_code_for(report: ValidationReport, strict: bool) -> int:
     errs = [i for i in report.issues if i.severity == "error"]
     warns = [i for i in report.issues if i.severity == "warning"]

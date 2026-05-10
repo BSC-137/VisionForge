@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build zlib1g-dev libopenmp-dev
+
+      - name: Configure & build (Release + OpenMP)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVISIONFORGE_OMP=ON
+          cmake --build build -j "$(nproc)"
+
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Loader + validator contract tests (pytest)
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "./python/visionforge_loader[dev]"
+          cd python/visionforge_loader && PYTHONPATH=. python3 -m pytest -q
+          cd ../.. && python3 -m pytest tests/test_validate_dataset_contracts.py -q
