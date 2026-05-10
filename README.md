@@ -472,6 +472,16 @@ Measured on 20-thread Xeon (WSL2). Build with `-DCMAKE_BUILD_TYPE=Release -DVISI
 
 ---
 
+## Developer smoke check
+
+It incrementally builds (CMake configure only if `build/visionforge` is missing), renders three `forge` frames into a temp dataset, validates with `--check-meta`, and runs loader tests with `PYTHONPATH=.` so imports work without an editable install.
+
+Loader tests need the dependencies from `python/visionforge_loader/README.md`, including `pytest` from the `[dev]` extra (`pip install ./python/visionforge_loader[dev]`).
+
+```bash
+./scripts/dev_smoke.sh
+```
+
 ## License
 
 BSD-3-Clause. See `LICENSE`.
