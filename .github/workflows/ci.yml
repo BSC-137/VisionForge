@@ -15,7 +15,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build zlib1g-dev libopenmp-dev
+          sudo apt-get install -y ninja-build zlib1g-dev libomp-dev
 
       - name: Configure & build (Release + OpenMP)
         run: |
