@@ -142,7 +142,7 @@ The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (i
 
 ### Python loader (`python/visionforge_loader`)
 
-A small **PyTorch**-first package (`pip install ./python/visionforge_loader`) loads `train/` / `val/` frames, parses `*_meta.json` + `*_spatial.exr`, and includes pytest checks that **world ↔ image projection** matches this README. See `python/visionforge_loader/README.md` and `python -m visionforge_loader.cli_projection_smoke`.
+A small **PyTorch**-first package (`pip install ./python/visionforge_loader`) loads `train/` / `val/` frames, parses `*_meta.json` + `*_spatial.exr`, and includes pytest checks that **world ↔ image projection** matches this README. See `python/visionforge_loader/README.md` and `python -m visionforge_loader.cli_projection_smoke`. `examples/train_supervision_baseline.py` is a minimal RGB→depth / RGB→normal supervision demo using only the public `VisionForgeDataset` API (details and run commands in that README).
 
 ### Domain randomization parameters (`world.json`)
 
@@ -472,15 +472,19 @@ Measured on 20-thread Xeon (WSL2). Build with `-DCMAKE_BUILD_TYPE=Release -DVISI
 
 ---
 
-## Developer smoke check
+## Developer tooling
 
-It incrementally builds (CMake configure only if `build/visionforge` is missing), renders three `forge` frames into a temp dataset, validates with `--check-meta`, and runs loader tests with `PYTHONPATH=.` so imports work without an editable install.
+### Repository smoke (`scripts/dev_smoke.sh`)
 
-Loader tests need the dependencies from `python/visionforge_loader/README.md`, including `pytest` from the `[dev]` extra (`pip install ./python/visionforge_loader[dev]`).
+`./scripts/dev_smoke.sh` incrementally builds the C++ target (running CMake configure only when `build/visionforge` is absent), renders three `forge` frames into a **temporary** dataset whose `dataset.root` is injected via a generated JSON (the tree is removed on exit), runs `scripts/validate_dataset.py --check-meta` on that export, and runs `python/visionforge_loader` pytest with `PYTHONPATH=.` so the package imports without an editable install. Loader tests require the dependencies in `python/visionforge_loader/README.md`, including `pytest` from the `[dev]` extra (`pip install ./python/visionforge_loader[dev]`).
 
 ```bash
 ./scripts/dev_smoke.sh
 ```
+
+### Baseline supervision (optional)
+
+For a tiny PyTorch CNN that predicts depth or world normals from RGB using existing loader tensors, see **Examples** in `python/visionforge_loader/README.md` (`examples/train_supervision_baseline.py`).
 
 ## License
 

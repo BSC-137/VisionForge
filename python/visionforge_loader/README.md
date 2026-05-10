@@ -14,6 +14,27 @@ pip install ./python/visionforge_loader[dev]
 
 Requires a working OpenEXR Python build (wheels are available on PyPI for common platforms).
 
+## Examples
+
+`examples/train_supervision_baseline.py` trains a small encoder–decoder CNN to predict **depth** (default) or **world normals** from RGB, using `VisionForgeDataset` only (same tensors as production: `rgb`, `depth`, `normal`, `meta`). Loss is masked so sky / miss pixels (including large finite depth sentinels) do not dominate the objective—see the module docstring.
+
+Generate a dataset with the main repo’s forge CLI (from the repo root, after building `./build/visionforge`), for example:
+
+```bash
+./build/visionforge forge --config world.json --frames 200
+```
+
+Then from `python/visionforge_loader` (so `test_cube.obj` paths in config remain valid relative to how you invoke forge—use the same working directory conventions as your forge run), run:
+
+```bash
+cd python/visionforge_loader
+PYTHONPATH=. python3 examples/train_supervision_baseline.py \
+  --dataset-root /path/to/your/forge/export \
+  --epochs 1 --max-samples 16 --batch-size 2 --device cpu
+```
+
+If you use `pip install -e ./python/visionforge_loader`, you still execute the script from the checkout path shown above, or set `PYTHONPATH` to the `python/visionforge_loader` directory that contains both `examples/` and the `visionforge_loader` package.
+
 ## Tests
 
 ```bash
