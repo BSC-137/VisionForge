@@ -474,7 +474,7 @@ Measured on 20-thread Xeon (WSL2). Build with `-DCMAKE_BUILD_TYPE=Release -DVISI
 
 ## Testing
 
-Run a **Release** build with OpenMP, then **CTest** for C++ contracts (world JSON parser, dataset manifest writer, meta/pose intrinsics), the **visionforge** CLI smoke checks (`--help` / unknown flag), **loader** pytest (geometry, projection, EXR wiring, training smoke), **dataset validator** pytest on synthetic trees, and optionally **`dev_smoke.sh`** for forge → validate → loader tests on a throwaway dataset. From the repo root (with pytest installed for Python tests):
+Run a **Release** build with OpenMP, then **CTest** for C++ contracts (world JSON parser, dataset manifest writer, meta/pose intrinsics), the **visionforge** CLI smoke checks (`--help` / unknown flag), **loader** pytest (geometry, projection, EXR wiring, training smoke), **dataset validator** pytest on synthetic trees, and **`dev_smoke.sh`** for forge → validate → loader tests on a throwaway dataset. From the repo root (with pytest installed for Python tests):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DVISIONFORGE_OMP=ON
@@ -485,6 +485,8 @@ cd ../.. && python3 -m pytest tests/test_validate_dataset_contracts.py -q
 python3 scripts/validate_dataset.py --dataset-root /path/to/dataset --split all --check-meta
 ./scripts/dev_smoke.sh
 ```
+
+GitHub Actions runs all of the above on every push and pull request to main.
 
 `validate_dataset.py` supports `--strict` (warnings fail) and `--json-report PATH` for machine-readable CI output; `--check-meta` enforces per-frame `*_meta.json` schema in addition to COCO/YOLO pairing.
 
