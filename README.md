@@ -500,6 +500,34 @@ GitHub Actions runs all of the above on every push and pull request to main.
 ./scripts/dev_smoke.sh
 ```
 
+### Verifying a rendered dataset
+
+```bash
+# 1. Generate a representative dataset from repo root:
+./build/visionforge forge --config world.json --frames 100
+
+# 2. Validate disk layout, COCO/YOLO pairing, and per-frame meta schema:
+python3 scripts/validate_dataset.py \
+  --dataset-root dataset --split all \
+  --check-meta --strict \
+  --json-report dataset/validation_report.json
+
+# 3. Verify camera projection math on real EXR + meta files:
+python3 -m visionforge_loader.cli_projection_smoke \
+  --dataset-root dataset --max-frames 5
+
+# 4. Run the training baseline on CPU (from python/visionforge_loader):
+PYTHONPATH=. python3 examples/train_supervision_baseline.py \
+  --dataset-root ../../dataset \
+  --epochs 1 --max-samples 16 --batch-size 2 --device cpu
+```
+
+Step 1 produces the synthetic export; step 2 checks disk layout and label contracts; step 3 confirms pose math round-trips through the pinhole model; step 4 proves the tensors are valid trainable ML inputs.
+
+Use `--frames 3` for a quick sanity check; use 500–1000 for a real training dataset.
+
+> **Note:** `world.json` ships a `test_cube.obj` asset. Swap in your own OBJ under `assets[]` for production datasets (see **Forge CLI** section above).
+
 ### Baseline supervision (optional)
 
 For a tiny PyTorch CNN that predicts depth or world normals from RGB using existing loader tensors, see **Examples** in `python/visionforge_loader/README.md` (`examples/train_supervision_baseline.py`).

@@ -18,13 +18,9 @@ Requires a working OpenEXR Python build (wheels are available on PyPI for common
 
 `examples/train_supervision_baseline.py` trains a small encoder–decoder CNN to predict **depth** (default) or **world normals** from RGB, using `VisionForgeDataset` only (same tensors as production: `rgb`, `depth`, `normal`, `meta`). Loss is masked so sky / miss pixels (including large finite depth sentinels) do not dominate the objective—see the module docstring.
 
-Generate a dataset with the main repo’s forge CLI (from the repo root, after building `./build/visionforge`), for example:
+For a full end-to-end verification walkthrough including validation and projection checks, see **Verifying a rendered dataset** in the root README.
 
-```bash
-./build/visionforge forge --config world.json --frames 200
-```
-
-Then from `python/visionforge_loader` (so `test_cube.obj` paths in config remain valid relative to how you invoke forge—use the same working directory conventions as your forge run), run:
+Then run:
 
 ```bash
 cd python/visionforge_loader
