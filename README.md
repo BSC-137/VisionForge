@@ -482,8 +482,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 cd python/visionforge_loader && PYTHONPATH=. python3 -m pytest -q
 cd ../.. && python3 -m pytest tests/test_validate_dataset_contracts.py -q
+python3 -m pytest tests/test_merge_coco_shards.py -q
 python3 scripts/validate_dataset.py --dataset-root /path/to/dataset --split all --check-meta
 ./scripts/dev_smoke.sh
+# For scenario end-to-end testing:
+VF_SMOKE_SCENARIO=1 ./scripts/dev_smoke.sh
 ```
 
 GitHub Actions runs all of the above on every push and pull request to main.

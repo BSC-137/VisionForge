@@ -128,6 +128,31 @@ static bool test_unknown_asset_reference_in_scenario() {
     return true;
 }
 
+static bool test_strict_rejects_normal_path() {
+    const std::string json = R"({
+      "assets": [{"path": "mesh.obj", "name": "m", "normal_path": "n.jpg"}]
+    })";
+    REQUIRE_THROW_MSG(load_world_config(write_temp_json(json).string(), {.strict = true}), "deprecated key");
+    return true;
+}
+
+static bool test_strict_rejects_obj_field() {
+    const std::string json = R"({
+      "assets": [{"obj": "mesh.obj", "name": "m"}]
+    })";
+    REQUIRE_THROW_MSG(load_world_config(write_temp_json(json).string(), {.strict = true}), "deprecated key");
+    return true;
+}
+
+static bool test_hdr_invalid_type_throws() {
+    const std::string json = R"({
+      "assets": [{"path": "mesh.obj", "name": "m"}],
+      "hdr": 42
+    })";
+    REQUIRE_THROW_MSG(load_world_config(write_temp_json(json).string(), {.strict = true}), "must be a string path");
+    return true;
+}
+
 static bool test_valid_scenario_asset_ref() {
     const std::string json = R"({
       "assets": [{"path": "mesh.obj", "name": "mesh"}],
@@ -159,6 +184,9 @@ int main() {
     if (!test_scenario_missing_name()) ++failures;
     if (!test_unknown_asset_reference_in_scenario()) ++failures;
     if (!test_valid_scenario_asset_ref()) ++failures;
+    if (!test_strict_rejects_normal_path()) ++failures;
+    if (!test_strict_rejects_obj_field()) ++failures;
+    if (!test_hdr_invalid_type_throws()) ++failures;
 
     if (failures) {
         std::cerr << failures << " test(s) failed\n";

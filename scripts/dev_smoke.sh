@@ -11,6 +11,7 @@ fi
 cmake --build "$REPO_ROOT/build" -j
 
 TMP="$(mktemp -d)"
+export TMP
 trap 'rm -rf "$TMP"' EXIT
 
 SMOKE_DS="${TMP}/smoke_dataset"
@@ -52,5 +53,28 @@ python3 scripts/validate_dataset.py --dataset-root "$SMOKE_DS" --check-meta
     exit 1
   fi
 )
+
+if [[ "${VF_SMOKE_SCENARIO:-0}" == "1" ]]; then
+  python3 - <<'PY'
+import json, os
+repo = os.environ["REPO_ROOT"]
+tmp  = os.environ["TMP"]
+ds   = tmp + "/smoke_scenario"
+os.makedirs(ds, exist_ok=True)
+with open(repo + "/examples/scenarios/stack_test.json") as f:
+    cfg = json.load(f)
+cfg["dataset"]["root"] = ds
+with open(tmp + "/smoke_scenario.json", "w") as f:
+    json.dump(cfg, f, indent=2)
+PY
+  "$REPO_ROOT/build/visionforge" scenario \
+    --config "$TMP/smoke_scenario.json" \
+    --name "stack_test" --frames 2
+  python3 scripts/validate_dataset.py \
+    --dataset-root "$TMP/smoke_scenario" \
+    --check-meta \
+    --coco "$TMP/smoke_scenario/scenario_coco.json"
+  echo "scenario smoke OK"
+fi
 
 echo "dev smoke OK"
