@@ -31,6 +31,15 @@ PYTHONPATH=. python3 examples/train_supervision_baseline.py \
 
 If you use `pip install -e ./python/visionforge_loader`, you still execute the script from the checkout path shown above, or set `PYTHONPATH` to the `python/visionforge_loader` directory that contains both `examples/` and the `visionforge_loader` package.
 
+`examples/export_pointcloud.py` back-projects the G-buffer depth into a world-space point cloud and writes an ASCII PLY file:
+
+```bash
+PYTHONPATH=. python3 examples/export_pointcloud.py \
+  --dataset-root /path/to/dataset --frame-index 0 --out scene.ply
+```
+
+Produces an ASCII PLY viewable in MeshLab or CloudCompare.
+
 ## Tests
 
 ```bash

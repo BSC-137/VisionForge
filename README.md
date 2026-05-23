@@ -142,7 +142,7 @@ The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (i
 
 ### Python loader (`python/visionforge_loader`)
 
-A small **PyTorch**-first package (`pip install ./python/visionforge_loader`) loads `train/` / `val/` frames, parses `*_meta.json` + `*_spatial.exr`, and includes pytest checks that **world ↔ image projection** matches this README. See `python/visionforge_loader/README.md` and `python -m visionforge_loader.cli_projection_smoke`. `examples/train_supervision_baseline.py` is a minimal RGB→depth / RGB→normal supervision demo using only the public `VisionForgeDataset` API (details and run commands in that README).
+A small **PyTorch**-first package (`pip install ./python/visionforge_loader`) loads `train/` / `val/` frames, parses `*_meta.json` + `*_spatial.exr`, and includes pytest checks that **world ↔ image projection** matches this README. See `python/visionforge_loader/README.md` and `python -m visionforge_loader.cli_projection_smoke`. `examples/train_supervision_baseline.py` is a minimal RGB→depth / RGB→normal supervision demo using only the public `VisionForgeDataset` API (details and run commands in that README). See also `export_pointcloud.py` in the loader examples for 3D back-projection of the G-buffer depth into world-space point clouds.
 
 ### Domain randomization parameters (`world.json`)
 
