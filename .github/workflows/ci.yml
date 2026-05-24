@@ -37,8 +37,10 @@ jobs:
           python3 -m pip install "./python/visionforge_loader[dev]"
           cd python/visionforge_loader && PYTHONPATH=. python3 -m pytest -q
           cd ../.. && python3 -m pytest tests/test_validate_dataset_contracts.py -q
+          python3 -m pytest tests/test_merge_coco_shards.py -q
 
       - name: End-to-end smoke (forge → validate → loader pytest)
         working-directory: ${{ github.workspace }}
         run: |
+          chmod +x ./scripts/dev_smoke.sh
           ./scripts/dev_smoke.sh
