@@ -1,6 +1,6 @@
 # VisionForge
 
-**VisionForge** is a high-performance Spatial AI engine and synthetic data factory built on a physically-based CPU path tracer in modern C++20. It renders procedural desert scenes with PBR materials and exports ground-truth data -- RGB images, depth maps, surface normals, instance masks, bounding boxes, and YOLO/COCO labels -- for training computer vision and spatial perception models.
+**VisionForge** is a high-performance Spatial AI engine and synthetic data factory built on a physically-based CPU path tracer in modern C++20. It renders procedural desert scenes with PBR materials and exports ground-truth data -- RGB images, depth maps, surface normals, instance masks, bounding boxes, and YOLO/COCO labels -- for training computer vision and spatial perception models. Designed for teams building object detection, depth estimation, surface normal prediction, or 6-DoF pose pipelines that need large, photorealistic, annotated datasets without manual labeling.
 
 ---
 
@@ -23,11 +23,13 @@
 * **Materials**: PBR (metallic/roughness), Lambertian diffuse, dielectric, metal, emissive area lights
 * **Adaptive sampling** with Welford variance and 95% confidence interval early termination
 * **OpenMP parallelization** across all render paths
-* **`manifest.json` (schema `2`)**: written once per dataset export (`forge`, `scenario`, or legacy mode) **or** once per shard as `manifest_shard_K.json` when using `--num-shards` > 1. Captures engine and Git identifiers (best-effort), schema version (`vf::k_manifest_schema_version`), the argv/CWD/timestamp used for the run, RNG semantics notes for reproducibility (including global frame index for `vf_rng`), the resolved world config as canonical JSON (optional SHA-256), OpenMP thread hints (best-effort), dataset split/layout metadata (including optional `shard` / `frames_rendered_this_process`), and a stable `dataset_id` hex fingerprint for indexing. CPU model and thread fields may be absent or approximate; manifest write failures are logged loudly and never abort rendering.
+* **`manifest.json` (schema `2`)**: one file per dataset (or per shard with `--num-shards`) recording the exact CLI args, seed, RNG contract, resolved config SHA-256, train/val split, and a stable `dataset_id` fingerprint — everything needed to reproduce or audit a run.
 
 ---
 
 ## Project Layout
+
+The C++ engine lives under `apps/` and `include/visionforge/`. The Python consumption layer (`visionforge_loader`) and data-factory scripts (`scripts/`) are fully independent and do not require rebuilding the engine after changes.
 
 ```
 VisionForge/
@@ -64,6 +66,8 @@ VisionForge/
 │  ├─ fast_obj.h                   # Single-header OBJ loader (MIT)
 │  ├─ nlohmann/                    # JSON for Modern C++ (MIT)
 │  └─ stb_image.h                  # Single-header image loader (MIT/public domain)
+├─ scripts/                        # validate_dataset.py, merge_coco_shards.py, dev_smoke.sh
+├─ python/visionforge_loader/      # PyTorch loader, examples/, tests/
 ├─ world.json                      # Example forge config with DR ranges + asset library
 ├─ test_cube.obj                   # Minimal test geometry
 ├─ CMakeLists.txt
@@ -83,6 +87,13 @@ sudo apt install -y build-essential cmake zlib1g-dev
 ```
 
 A compiler with **OpenMP** support (GCC, Clang, or MSVC) enables multithreaded rendering.
+
+**Python (optional — loader, examples, validation scripts)**
+
+```bash
+pip install ./python/visionforge_loader        # PyTorch loader
+pip install ./python/visionforge_loader[dev]   # + pytest for tests
+```
 
 ---
 
