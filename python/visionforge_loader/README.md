@@ -66,6 +66,8 @@ Matches the main VisionForge README section **Meta / pose convention** (`*_meta.
 
 Projection implements the same **negated vertical** term as `tests/test_meta_pose.cpp`: with \(P_c = \mathrm{w2c}\,P_w\), \(u = f_x X_c/Z_c + c_x\), \(v = -f_y Y_c/Z_c + c_y\) (v increases downward, consistent with `get_ray`'s \((t-0.5)\) on `Camera::vertical`).
 
+Use `instance_id_to_class_id(instance_id_arr, meta.json_raw)` to map the `InstanceID` EXR channel to per-pixel semantic class without any C++ changes.
+
 ## Sharding
 
 Distributed renders use global frame indices in filenames (`frame_0123` → \(g=123\)). Merge COCO with:

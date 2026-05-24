@@ -74,6 +74,26 @@ def w2c_from_c2w(c2w: np.ndarray) -> np.ndarray:
     return np.linalg.inv(c2w.astype(np.float64))
 
 
+def instance_id_to_class_id(
+    instance_id: "np.ndarray",
+    meta_json_raw: dict,
+) -> "np.ndarray":
+    """
+    Map per-pixel InstanceID values (from spatial EXR) to semantic class_id
+    using the objects[] list in *_meta.json. Background / miss pixels (id == 0
+    or id not in objects) map to 0.
+    """
+    mapping: dict[int, int] = {
+        int(obj.get("instance_id", 0)): int(obj.get("class_id", 0))
+        for obj in meta_json_raw.get("objects", [])
+    }
+    ids = np.round(instance_id).astype(np.int32)
+    out = np.zeros(ids.shape, dtype=np.int32)
+    for iid, cid in mapping.items():
+        out[ids == iid] = cid
+    return out
+
+
 def project_world_to_pixel(
     w2c: np.ndarray,
     fx: float,
