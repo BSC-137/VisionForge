@@ -1568,8 +1568,9 @@ static int run_scenario_subcommand(int argc, char** argv) {
 
         if (cli.num_shards > 1 && (g % cli.num_shards) != cli.shard_id) continue;
 
-        const double focus_dist = (active_scenario->camera.lookfrom.max - active_scenario->camera.lookat).length();
-        Vec3 lf = active_scenario->camera.lookfrom.max;
+        const double alpha = (cli.frames > 1) ? double(g) / double(cli.frames - 1) : 0.0;
+        Vec3 lf = interpolate_trajectory(active_scenario->camera, alpha);
+        const double focus_dist = (lf - active_scenario->camera.lookat).length();
         double c_fov = active_scenario->camera.fov_deg.max;
         Camera cam(lf, active_scenario->camera.lookat, active_scenario->camera.up, c_fov, aspect, 0.0, focus_dist, 0.0, 1.0);
 

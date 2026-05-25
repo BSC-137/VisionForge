@@ -45,6 +45,11 @@ struct AssetEntry {
     std::string metallic_map;
 };
 
+struct CameraKeyframe {
+    double t = 0.0;  // normalized frame fraction in [0, 1]
+    Vec3   pos;
+};
+
 struct WorldConfig {
     struct Render {
         int width = 1280;
@@ -62,6 +67,8 @@ struct WorldConfig {
         Vec3 up = Vec3(0.0, 1.0, 0.0);
         Vec3Range lookfrom = {Vec3(18.0, 8.0, 24.0), Vec3(18.0, 8.0, 24.0)};
         ScalarRange fov_deg = {35.0, 35.0};
+        // Optional keyframe trajectory; when non-empty overrides lookfrom for per-frame positions.
+        std::vector<CameraKeyframe> trajectory;
     } camera;
 
     struct Lighting {
@@ -140,6 +147,28 @@ struct WorldConfigParseOptions {
     /// deprecated aliases (`albedo_path`, `obj`, …) fail with actionable messages.
     bool strict = true;
 };
+
+/// Compute camera lookfrom position for a normalized frame fraction `alpha` in [0, 1].
+/// If `cam.trajectory` is non-empty, linearly interpolates between the sorted keyframes.
+/// Falls back to `cam.lookfrom.max` when no trajectory is defined (preserves existing behaviour).
+inline Vec3 interpolate_trajectory(const WorldConfig::Camera& cam, double alpha) {
+    if (cam.trajectory.empty()) {
+        return cam.lookfrom.max;
+    }
+    alpha = std::clamp(alpha, 0.0, 1.0);
+    const auto& kfs = cam.trajectory;
+    if (kfs.size() == 1) return kfs[0].pos;
+    if (alpha <= kfs.front().t) return kfs.front().pos;
+    if (alpha >= kfs.back().t)  return kfs.back().pos;
+    for (size_t i = 0; i + 1 < kfs.size(); ++i) {
+        if (alpha >= kfs[i].t && alpha <= kfs[i + 1].t) {
+            const double span = kfs[i + 1].t - kfs[i].t;
+            const double u    = (span > 0.0) ? (alpha - kfs[i].t) / span : 0.0;
+            return kfs[i].pos + u * (kfs[i + 1].pos - kfs[i].pos);
+        }
+    }
+    return kfs.back().pos;
+}
 
 namespace vf_world_config_detail {
 
@@ -458,6 +487,32 @@ inline WorldConfig load_world_config(const std::string& path, WorldConfigParseOp
         if (r.contains(std::string(ck::k_seed))) cfg.render.seed = r.at(std::string(ck::k_seed)).get<unsigned>();
     }
 
+    auto parse_camera_trajectory = [&](const json& c, const std::string& cam_path,
+                                        WorldConfig::Camera& cam_out) {
+        if (!c.contains(std::string(ck::k_trajectory))) return;
+        const auto& arr = c.at(std::string(ck::k_trajectory));
+        if (!arr.is_array()) {
+            throw WorldConfigError(cam_path + ".trajectory: expected JSON array of keyframes");
+        }
+        cam_out.trajectory.clear();
+        size_t ki = 0;
+        for (const auto& kf : arr) {
+            const std::string kfpath = cam_path + ".trajectory[" + std::to_string(ki) + "]";
+            validate_object_keys(kf, {ck::k_t, ck::k_pos}, {}, kfpath, strict);
+            if (!kf.contains(std::string(ck::k_t)))
+                throw WorldConfigError(kfpath + ": missing required field `t`");
+            if (!kf.contains(std::string(ck::k_pos)))
+                throw WorldConfigError(kfpath + ": missing required field `pos`");
+            CameraKeyframe ckf;
+            ckf.t   = kf.at(std::string(ck::k_t)).get<double>();
+            ckf.pos = parse_vec3_json(kf.at(std::string(ck::k_pos)), (kfpath + ".pos").c_str());
+            cam_out.trajectory.push_back(ckf);
+            ++ki;
+        }
+        std::stable_sort(cam_out.trajectory.begin(), cam_out.trajectory.end(),
+                         [](const CameraKeyframe& a, const CameraKeyframe& b){ return a.t < b.t; });
+    };
+
     if (root.contains(std::string(ck::k_camera))) {
         const auto& c = root.at(std::string(ck::k_camera));
         validate_object_keys(c,
@@ -466,6 +521,7 @@ inline WorldConfig load_world_config(const std::string& path, WorldConfigParseOp
                                  ck::k_up,
                                  ck::k_lookfrom,
                                  ck::k_fov_deg,
+                                 ck::k_trajectory,
                              },
                              {},
                              "camera",
@@ -480,6 +536,7 @@ inline WorldConfig load_world_config(const std::string& path, WorldConfigParseOp
         if (c.contains(std::string(ck::k_fov_deg)))
             cfg.camera.fov_deg =
                 parse_scalar_range(c.at(std::string(ck::k_fov_deg)), "camera.fov_deg", strict);
+        parse_camera_trajectory(c, "camera", cfg.camera);
     }
 
     if (root.contains(std::string(ck::k_lighting))) {
@@ -721,6 +778,7 @@ inline WorldConfig load_world_config(const std::string& path, WorldConfigParseOp
                                          ck::k_up,
                                          ck::k_lookfrom,
                                          ck::k_fov_deg,
+                                         ck::k_trajectory,
                                      },
                                      {},
                                      sp + ".camera",
@@ -736,6 +794,7 @@ inline WorldConfig load_world_config(const std::string& path, WorldConfigParseOp
                 if (c.contains(std::string(ck::k_fov_deg)))
                     scenario.camera.fov_deg =
                         parse_scalar_range(c.at(std::string(ck::k_fov_deg)), sp + ".camera.fov_deg", strict);
+                parse_camera_trajectory(c, sp + ".camera", scenario.camera);
             }
 
             if (s.contains(std::string(ck::k_root_nodes)) && s.at(std::string(ck::k_root_nodes)).is_array()) {

@@ -35,6 +35,9 @@ inline constexpr std::string_view k_lookat     = "lookat";
 inline constexpr std::string_view k_up           = "up";
 inline constexpr std::string_view k_lookfrom   = "lookfrom";
 inline constexpr std::string_view k_fov_deg    = "fov_deg";
+inline constexpr std::string_view k_trajectory = "trajectory";
+inline constexpr std::string_view k_t          = "t";
+inline constexpr std::string_view k_pos        = "pos";
 
 // lighting
 inline constexpr std::string_view k_sun_azimuth_deg   = "sun_azimuth_deg";

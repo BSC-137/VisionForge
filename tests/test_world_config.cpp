@@ -174,6 +174,107 @@ static bool test_valid_scenario_asset_ref() {
     return true;
 }
 
+static bool test_trajectory_parse_and_interpolate() {
+    const std::string json = R"({
+      "assets": [{"path": "mesh.obj", "name": "mesh"}],
+      "scenarios": [{
+        "name": "dolly",
+        "camera": {
+          "trajectory": [
+            {"t": 0.0, "pos": [18.0, 8.0, 24.0]},
+            {"t": 1.0, "pos": [-18.0, 8.0, 24.0]}
+          ]
+        }
+      }]
+    })";
+    try {
+        WorldConfig cfg = load_world_config(write_temp_json(json).string(), {.strict = true});
+        if (cfg.scenarios.size() != 1) {
+            std::cerr << "FAIL: trajectory_parse: expected 1 scenario\n";
+            return false;
+        }
+        const auto& cam = cfg.scenarios[0].camera;
+        if (cam.trajectory.size() != 2) {
+            std::cerr << "FAIL: trajectory_parse: expected 2 keyframes, got " << cam.trajectory.size() << "\n";
+            return false;
+        }
+
+        // alpha = 0.0 → keyframe 0 position
+        Vec3 pos0 = interpolate_trajectory(cam, 0.0);
+        if (std::abs(pos0.x - 18.0) > 1e-9 || std::abs(pos0.y - 8.0) > 1e-9 || std::abs(pos0.z - 24.0) > 1e-9) {
+            std::cerr << "FAIL: trajectory alpha=0.0: expected (18,8,24), got ("
+                      << pos0.x << "," << pos0.y << "," << pos0.z << ")\n";
+            return false;
+        }
+
+        // alpha = 1.0 → keyframe 1 position
+        Vec3 pos1 = interpolate_trajectory(cam, 1.0);
+        if (std::abs(pos1.x - (-18.0)) > 1e-9 || std::abs(pos1.y - 8.0) > 1e-9 || std::abs(pos1.z - 24.0) > 1e-9) {
+            std::cerr << "FAIL: trajectory alpha=1.0: expected (-18,8,24), got ("
+                      << pos1.x << "," << pos1.y << "," << pos1.z << ")\n";
+            return false;
+        }
+
+        // alpha = 0.5 → midpoint (0, 8, 24)
+        Vec3 pos_mid = interpolate_trajectory(cam, 0.5);
+        if (std::abs(pos_mid.x - 0.0) > 1e-9 || std::abs(pos_mid.y - 8.0) > 1e-9 || std::abs(pos_mid.z - 24.0) > 1e-9) {
+            std::cerr << "FAIL: trajectory alpha=0.5: expected (0,8,24), got ("
+                      << pos_mid.x << "," << pos_mid.y << "," << pos_mid.z << ")\n";
+            return false;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "FAIL: trajectory_parse_and_interpolate: " << ex.what() << "\n";
+        return false;
+    }
+    return true;
+}
+
+static bool test_trajectory_empty_falls_back_to_lookfrom_max() {
+    const std::string json = R"({
+      "assets": [{"path": "mesh.obj", "name": "mesh"}],
+      "scenarios": [{
+        "name": "static",
+        "camera": {
+          "lookfrom": [10.0, 5.0, 15.0]
+        }
+      }]
+    })";
+    try {
+        WorldConfig cfg = load_world_config(write_temp_json(json).string(), {.strict = true});
+        const auto& cam = cfg.scenarios[0].camera;
+        if (!cam.trajectory.empty()) {
+            std::cerr << "FAIL: trajectory should be empty when not specified\n";
+            return false;
+        }
+        Vec3 lf = interpolate_trajectory(cam, 0.5);
+        if (std::abs(lf.x - 10.0) > 1e-9 || std::abs(lf.y - 5.0) > 1e-9 || std::abs(lf.z - 15.0) > 1e-9) {
+            std::cerr << "FAIL: fallback to lookfrom.max: expected (10,5,15), got ("
+                      << lf.x << "," << lf.y << "," << lf.z << ")\n";
+            return false;
+        }
+    } catch (const std::exception& ex) {
+        std::cerr << "FAIL: trajectory_empty_fallback: " << ex.what() << "\n";
+        return false;
+    }
+    return true;
+}
+
+static bool test_trajectory_unknown_key_strict_rejects() {
+    const std::string json = R"({
+      "assets": [{"path": "mesh.obj", "name": "mesh"}],
+      "scenarios": [{
+        "name": "s",
+        "camera": {
+          "trajectory": [
+            {"t": 0.0, "pos": [0, 0, 0], "bogus": 1}
+          ]
+        }
+      }]
+    })";
+    REQUIRE_THROW_MSG(load_world_config(write_temp_json(json).string(), {.strict = true}), "unknown key");
+    return true;
+}
+
 int main() {
     int failures = 0;
     if (!test_canonical_minimal_strict_ok()) ++failures;
@@ -187,6 +288,9 @@ int main() {
     if (!test_strict_rejects_normal_path()) ++failures;
     if (!test_strict_rejects_obj_field()) ++failures;
     if (!test_hdr_invalid_type_throws()) ++failures;
+    if (!test_trajectory_parse_and_interpolate()) ++failures;
+    if (!test_trajectory_empty_falls_back_to_lookfrom_max()) ++failures;
+    if (!test_trajectory_unknown_key_strict_rejects()) ++failures;
 
     if (failures) {
         std::cerr << failures << " test(s) failed\n";

@@ -294,6 +294,60 @@ The underlying pipeline traces nested `local_to_world` conversions globally into
 
 ---
 
+## Camera Trajectories
+
+By default every scenario frame is rendered from the fixed `lookfrom` position. Adding a `trajectory` array to a scenario's `camera` block enables **per-frame camera movement**, making it possible to generate optical-flow ground truth and multi-view datasets in a single pass.
+
+### How it works
+
+Each keyframe has a normalized time `t ∈ [0, 1]` and a `pos` (world-space camera origin). The engine linearly interpolates between keyframes using `alpha = g / (frames - 1)` for frame `g`. When no `trajectory` is provided the existing `lookfrom` behaviour is preserved — fully backwards compatible.
+
+### Example: linear dolly over 100 frames
+
+```json
+{
+  "assets": [{"path": "assets/rover.obj", "name": "rover"}],
+  "scenarios": [
+    {
+      "name": "DollyShot",
+      "camera": {
+        "lookat": [0.0, 1.2, 0.0],
+        "fov_deg": 35,
+        "trajectory": [
+          {"t": 0.0, "pos": [ 18.0, 8.0, 24.0]},
+          {"t": 1.0, "pos": [-18.0, 8.0, 24.0]}
+        ]
+      },
+      "root_nodes": [
+        {"name": "rover", "asset": "rover", "position": [0, 0, 0], "grounding_constraint": true}
+      ]
+    }
+  ]
+}
+```
+
+Render with:
+
+```bash
+./build/visionforge scenario --config world.json --name DollyShot --frames 100
+```
+
+This sweeps the camera from `(18, 8, 24)` to `(-18, 8, 24)` in 100 evenly-spaced steps, writing a `meta.json` per frame that records the exact camera origin — ready for optical-flow or NeRF training pipelines.
+
+### Multi-stop trajectory
+
+More than two keyframes are supported. Keyframes are automatically sorted by `t` and the correct pair is selected for each frame:
+
+```json
+"trajectory": [
+  {"t": 0.00, "pos": [ 18.0,  8.0, 24.0]},
+  {"t": 0.50, "pos": [  0.0, 14.0,  0.0]},
+  {"t": 1.00, "pos": [-18.0,  8.0, 24.0]}
+]
+```
+
+---
+
 ## Manual Render
 
 The default path renders a single scene with labeled cubes and optional OBJ meshes.
