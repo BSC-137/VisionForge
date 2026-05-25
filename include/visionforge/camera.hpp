@@ -38,6 +38,16 @@ public:
         lower_left_corner = origin - horizontal*0.5 - vertical*0.5 - focus_dist * w;
     }
 
+    // Transform a world-space point into camera space.
+    // Returns (right, down, forward) matching the pinhole projection convention:
+    //   u_pixel = fx * (x / z) + cx
+    //   v_pixel = fy * (y / z) + cy
+    // where z > 0 means the point is in front of the camera.
+    Vec3 world_to_camera(const Vec3& p) const {
+        Vec3 d = p - origin;
+        return Vec3(dot(d, u), dot(d, -v), dot(d, -w));
+    }
+
     Ray get_ray(double s, double t) const {
         // Depth of field: sample a disk aperture
         Vec3 rd = lens_radius * random_in_unit_disk();

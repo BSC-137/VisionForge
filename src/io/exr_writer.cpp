@@ -87,7 +87,10 @@ bool write_gbuffer_exr(const char* path, const GBuffer& gbuf) {
     const int w = gbuf.width;
     const int h = gbuf.height;
     const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
-    constexpr int NC = 5;
+    // Channels (alphabetical, as required by TinyEXR):
+    //   Depth, InstanceID, Normal.X, Normal.Y, Normal.Z, flow.x, flow.y
+    // ASCII order: 'D'(68) < 'I'(73) < 'N'(78) < 'f'(102)
+    constexpr int NC = 7;
 
     // Per-pixel instance id as float32. Values are exact integers for ids <= 2^24 - 1 (16777215);
     // larger uint32_t ids may not round-trip through IEEE-754 float.
@@ -101,14 +104,14 @@ bool write_gbuffer_exr(const char* path, const GBuffer& gbuf) {
     image.width  = w;
     image.height = h;
 
-    // TinyEXR requires channels sorted alphabetically by name.
-    // Depth, InstanceID, Normal.X, Normal.Y, Normal.Z
     float* ch_ptrs[NC] = {
         const_cast<float*>(gbuf.depth.data()),
         instance_id_f.data(),
         const_cast<float*>(gbuf.normal_x.data()),
         const_cast<float*>(gbuf.normal_y.data()),
         const_cast<float*>(gbuf.normal_z.data()),
+        const_cast<float*>(gbuf.flow_x.data()),
+        const_cast<float*>(gbuf.flow_y.data()),
     };
     image.images = reinterpret_cast<unsigned char**>(ch_ptrs);
 
@@ -119,6 +122,8 @@ bool write_gbuffer_exr(const char* path, const GBuffer& gbuf) {
     std::strcpy(header.channels[2].name, "Normal.X");
     std::strcpy(header.channels[3].name, "Normal.Y");
     std::strcpy(header.channels[4].name, "Normal.Z");
+    std::strcpy(header.channels[5].name, "flow.x");
+    std::strcpy(header.channels[6].name, "flow.y");
 
     header.pixel_types           = (int*)malloc(sizeof(int) * NC);
     header.requested_pixel_types = (int*)malloc(sizeof(int) * NC);

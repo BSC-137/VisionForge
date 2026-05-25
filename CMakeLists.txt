@@ -138,10 +138,13 @@ if(VISIONFORGE_TESTS)
   )
   add_executable(test_meta_pose tests/test_meta_pose.cpp)
   target_link_libraries(test_meta_pose PRIVATE visionforge)
+  add_executable(test_flow_math tests/test_flow_math.cpp)
+  target_link_libraries(test_flow_math PRIVATE visionforge)
   enable_testing()
   add_test(NAME world_config COMMAND test_world_config)
   add_test(NAME dataset_manifest COMMAND test_dataset_manifest)
   add_test(NAME meta_pose COMMAND test_meta_pose)
+  add_test(NAME flow_math COMMAND test_flow_math)
 
   # CLI sanity (no assets): exit 0 on --help, non-zero on unknown flags
   add_test(NAME visionforge_cli_help COMMAND $<TARGET_FILE:visionforge_app> --help)

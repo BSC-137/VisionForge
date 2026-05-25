@@ -906,6 +906,50 @@ static int render_frame(const Opts& o,
     return int(double(spp_accum) / double(width * height) + 0.5);
 }
 
+// Compute screen-space optical flow into gbuf.flow_x / flow_y after render_frame().
+// For each pixel: reconstruct its world-space hit point from depth + curr_cam, then
+// project through prev_cam to get (u_prev, v_prev); flow = (u_prev - col, v_prev - row).
+// Sky/miss pixels (depth >= 1e29) and points behind prev_cam are left at 0.
+static void compute_optical_flow(GBuffer& gbuf, const Camera& curr_cam, const Camera& prev_cam,
+                                  double vfov_deg) {
+    const int W = gbuf.width;
+    const int H = gbuf.height;
+    double fx = 0.0, fy = 0.0, cx = 0.0, cy = 0.0;
+    vf::meta_pose::pinhole_intrinsics_match_renderer(W, H, vfov_deg, fx, fy, cx, cy);
+
+    for (int row = 0; row < H; ++row) {
+        for (int col = 0; col < W; ++col) {
+            const int pix = row * W + col;
+            const float depth = gbuf.depth[pix];
+            if (depth >= 1e29f) {
+                gbuf.flow_x[pix] = 0.0f;
+                gbuf.flow_y[pix] = 0.0f;
+                continue;
+            }
+            // NDC for the current pixel (no jitter — use pixel centre)
+            const double u_ndc = (W > 1) ? double(col) / double(W - 1) : 0.5;
+            const double v_ndc = (H > 1) ? double(H - 1 - row) / double(H - 1) : 0.5;
+            // Unnormalized ray direction for the current camera (pinhole)
+            const Vec3 dir_unnorm = curr_cam.lower_left_corner
+                                    + u_ndc * curr_cam.horizontal
+                                    + v_ndc * curr_cam.vertical
+                                    - curr_cam.origin;
+            const Vec3 world_pt = curr_cam.origin + double(depth) * normalize(dir_unnorm);
+            // Project through prev_cam
+            const Vec3 p_cam = prev_cam.world_to_camera(world_pt);
+            if (p_cam.z <= 0.0) {
+                gbuf.flow_x[pix] = 0.0f;
+                gbuf.flow_y[pix] = 0.0f;
+                continue;
+            }
+            const float u_prev = float(fx * p_cam.x / p_cam.z + cx);
+            const float v_prev = float(fy * p_cam.y / p_cam.z + cy);
+            gbuf.flow_x[pix] = u_prev - float(col);
+            gbuf.flow_y[pix] = v_prev - float(row);
+        }
+    }
+}
+
 // ---- Async I/O pipeline for forge ----
 
 struct FrameObject {
@@ -939,6 +983,8 @@ struct ForgeFrameData {
     Vec3 cam_origin;
     Vec3 cam_u, cam_v, cam_w;
     double focus_dist = 0;
+
+    Camera prev_cam;   // camera from the previous frame (same as current for frame 0)
 
     std::vector<FrameObject> objects;
 
@@ -1246,6 +1292,7 @@ static int run_forge_subcommand(int argc, char** argv) {
     ForgeIOWorker io_worker;
     double total_render_ms = 0.0;
     int frames_rendered = 0;
+    Camera forge_prev_cam;   // initialised to default; overwritten at end of first rendered frame
 
     for (int g = 0; g < cli.frames; ++g) {
         Vec3 lookfrom = sample_range(dr_rng, cfg.camera.lookfrom);
@@ -1304,13 +1351,16 @@ static int run_forge_subcommand(int argc, char** argv) {
 
         const double focus_dist = (lookfrom - cfg.camera.lookat).length();
         Camera cam(lookfrom, cfg.camera.lookat, cfg.camera.up, fov, aspect, 0.0, focus_dist, 0.0, 1.0);
+        // First rendered frame: no previous position, so prev == curr (zero flow)
+        if (frames_rendered == 0) forge_prev_cam = cam;
 
         vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(g));
         gbuf.clear();
         auto t_render_start = std::chrono::high_resolution_clock::now();
         int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, true);
         auto t_render_end = std::chrono::high_resolution_clock::now();
-        
+        compute_optical_flow(gbuf, cam, forge_prev_cam, fov);
+
         double render_ms = std::chrono::duration<double, std::milli>(t_render_end - t_render_start).count();
         total_render_ms += render_ms;
 
@@ -1325,6 +1375,7 @@ static int run_forge_subcommand(int argc, char** argv) {
         fd.fb = std::move(fb); fd.gbuf = std::move(gbuf);
         fd.lookfrom = lookfrom; fd.lookat = cfg.camera.lookat; fd.up = cfg.camera.up; fd.fov = fov;
         fd.sun_az = sun_az; fd.sun_el = sun_el;
+        fd.prev_cam = forge_prev_cam;
 
         FrameObject fo;
         fo.instance_id = 1;
@@ -1351,6 +1402,7 @@ static int run_forge_subcommand(int argc, char** argv) {
         fb.clear();
         fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
         gbuf = GBuffer(o.width, o.height);
+        forge_prev_cam = cam;
 
         if (cli.verbose) {
             std::cout << "Frame " << (g + 1) << "/" << cli.frames << "  render=" << (int)render_ms << "ms\n";
@@ -1489,6 +1541,7 @@ static int run_scenario_subcommand(int argc, char** argv) {
     ForgeIOWorker io_worker;
     double total_render_ms = 0.0;
     int frames_rendered = 0;
+    Camera scenario_prev_cam;   // overwritten at end of first rendered frame
 
     std::function<std::shared_ptr<SceneNode>(const WorldConfig::NodeEntry&)> build_node;
     build_node = [&](const WorldConfig::NodeEntry& entry) -> std::shared_ptr<SceneNode> {
@@ -1573,12 +1626,14 @@ static int run_scenario_subcommand(int argc, char** argv) {
         const double focus_dist = (lf - active_scenario->camera.lookat).length();
         double c_fov = active_scenario->camera.fov_deg.max;
         Camera cam(lf, active_scenario->camera.lookat, active_scenario->camera.up, c_fov, aspect, 0.0, focus_dist, 0.0, 1.0);
+        if (frames_rendered == 0) scenario_prev_cam = cam;
 
         vf_rng::seed_thread_rng(uint64_t(o.seed) + uint64_t(g));
         gbuf.clear();
         auto t0 = std::chrono::high_resolution_clock::now();
         int avg_spp = render_frame(o, cam, frame_world, rect_light, fb, gbuf, true);
         double render_ms = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        compute_optical_flow(gbuf, cam, scenario_prev_cam, c_fov);
         total_render_ms += render_ms;
         if (cli.verbose) std::cout << "Scenario Frame " << (g + 1) << "/" << cli.frames << " " << (int)render_ms << "ms\n";
 
@@ -1598,10 +1653,12 @@ static int run_scenario_subcommand(int argc, char** argv) {
         fd.cam_v = cam.v;
         fd.cam_w = cam.w;
         fd.focus_dist = focus_dist;
+        fd.prev_cam = scenario_prev_cam;
         io_worker.push(std::move(fd));
 
         fb.clear(); fb.reserve(static_cast<size_t>(o.width) * static_cast<size_t>(o.height) * 3);
         gbuf = GBuffer(o.width, o.height);
+        scenario_prev_cam = cam;
         ++frames_rendered;
     }
 

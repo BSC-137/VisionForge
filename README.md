@@ -10,7 +10,7 @@
 * **Forge data factory**: `visionforge forge` generates thousands of labeled frames with full domain randomization from a single JSON config
 * **Async I/O pipeline**: dedicated background thread writes PNG, EXR, YOLO, and COCO while the next frame renders
 * **Thread-local xoshiro256+ PRNG**: zero-contention random number generation across OpenMP threads
-* **G-Buffer export**: per-pixel depth, **InstanceID**, and world-space normals in one multi-channel OpenEXR (`Depth`, `InstanceID`, `Normal.X/Y/Z`; all float32—instance ids round-trip exactly when ≤ 16,777,215)
+* **G-Buffer export**: per-pixel depth, **InstanceID**, world-space normals, and **screen-space optical flow** in one multi-channel OpenEXR (`Depth`, `InstanceID`, `Normal.X/Y/Z`, `flow.x`, `flow.y`; all float32—instance ids round-trip exactly when ≤ 16,777,215)
 * **One-pass labeling**: bounding boxes computed from the G-Buffer in a single scan, feeding YOLO `.txt`, COCO `.json`, CSV, and JSON simultaneously
 * **BVH acceleration** with longest-extent axis splitting over all scene primitives
 * **Phase 8 textures without Phase 7 slowdown**: UVs (and normal-map TBN basis) are computed lazily *only when* a material actually has textures bound
@@ -139,10 +139,24 @@ The `forge` subcommand generates labeled training data at scale with full domain
 | File | Description |
 |------|-------------|
 | `frame_XXXX.png` | PBR-rendered RGB |
-| `frame_XXXX_spatial.exr` | G-Buffer EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z` (float32) |
+| `frame_XXXX_spatial.exr` | G-Buffer EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z`, `flow.x`, `flow.y` (all float32) |
 | `frame_XXXX_meta.json` | Frame metadata: `camera_extrinsics` (16 floats, **c2w** row-major), `camera_intrinsics` (`fx`,`fy`,`cx`,`cy`, vertical `vfov_deg`), legacy `camera` block, sun, and `objects[]` with full `rotation_deg` / `scale`, `local_to_world_row_major`, `grounding_constraint`, `terrain_normal`, `transform_supervision` |
 
 The `scenario` subcommand uses the same sidecar layout with stems `sfrm_XXXX` (instead of `frame_XXXX`) and writes `scenario_coco.json` at the dataset root (or `scenario_coco_shard_K.json` when sharding).
+
+### G-Buffer channels
+
+| EXR channel | Type | Description |
+|-------------|------|-------------|
+| `Depth` | float32 | Linear distance from camera origin to hit point (metres); `1e30` for sky/miss |
+| `InstanceID` | float32 | Per-pixel instance id (integer round-trips exactly for ids ≤ 16 777 215) |
+| `Normal.X` | float32 | World-space surface normal X |
+| `Normal.Y` | float32 | World-space surface normal Y |
+| `Normal.Z` | float32 | World-space surface normal Z |
+| `flow.x` | float32 | **Optical flow** — horizontal displacement in pixels: \(u_{\text{prev}} - u_{\text{curr}}\) |
+| `flow.y` | float32 | **Optical flow** — vertical displacement in pixels: \(v_{\text{prev}} - v_{\text{curr}}\) |
+
+**Optical flow sign convention**: positive `flow.x` means the scene moved right between the previous and current frame (i.e. the camera moved left). Zero for sky/miss pixels and for the first frame in a sequence. Computed from a post-render pinhole reprojection of each depth pixel through the previous frame's camera.
 
 ### Meta / pose convention (`*_meta.json`)
 
@@ -383,7 +397,7 @@ The default path renders a single scene with labeled cubes and optional OBJ mesh
 | File | Description |
 |------|-------------|
 | `image.ppm`, `image.png` | Tonemapped RGB (ACES + sqrt gamma) |
-| `gbuffer.exr` | 32-bit float EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z` (with `--exr`) |
+| `gbuffer.exr` | 32-bit float EXR: `Depth`, `InstanceID`, `Normal.X`, `Normal.Y`, `Normal.Z`, `flow.x`, `flow.y` (with `--exr`) |
 | `inst.pgm` | Per-pixel instance mask (8-bit; ids above 255 clamped—use EXR `InstanceID` for full precision) |
 | `labels_yolo.txt` | YOLO-format labels |
 | `labels_coco.json` | COCO annotations |
@@ -412,7 +426,7 @@ The default path renders a single scene with labeled cubes and optional OBJ mesh
 | `--seed` | `1337` | RNG seed |
 | `--exposure` | `6.5` | Exposure multiplier |
 | `--sky-gain` | `45` | Sky brightness |
-| `--exr` | off | Write `gbuffer.exr` (`Depth`, `InstanceID`, `Normal.X/Y/Z`) |
+| `--exr` | off | Write `gbuffer.exr` (`Depth`, `InstanceID`, `Normal.X/Y/Z`, `flow.x`, `flow.y`) |
 | `--depth-only` | off | Primary-ray pass only (implies `--exr`) |
 
 ### Camera
