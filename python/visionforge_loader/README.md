@@ -68,6 +68,70 @@ Projection implements the same **negated vertical** term as `tests/test_meta_pos
 
 Use `instance_id_to_class_id(instance_id_arr, meta.json_raw)` to map the `InstanceID` EXR channel to per-pixel semantic class without any C++ changes.
 
+## Streaming Export
+
+Re-pack a rendered dataset into [WebDataset](https://github.com/webdataset/webdataset) `.tar` shards for fast sequential reads on NFS, S3, or distributed training clusters.
+
+### Install the optional dependency
+
+```bash
+pip install "visionforge-loader[streaming]"
+# or directly:
+pip install webdataset
+```
+
+### Pack a dataset
+
+```python
+from visionforge_loader import to_webdataset
+
+shards = to_webdataset(
+    "/path/to/forge/export",   # directory containing train/ and val/
+    "/path/to/output/shards",  # destination; created if absent
+    split="both",              # "train", "val", or "both"
+    frames_per_shard=1000,     # 1000 for GPU training; 100 for debugging
+)
+print(f"Wrote {len(shards)} shards: {shards[:3]} …")
+```
+
+Each shard is a standard `.tar` file.  Shard names follow the pattern `shard-000000.tar`, `shard-000001.tar`, … Each sample contains:
+
+| Key | Content |
+|-----|---------|
+| `{stem}.png` | RGB rendered image |
+| `{stem}.exr` | Spatial G-Buffer (depth, normals, optical flow) |
+| `{stem}.json` | Frame meta JSON (camera intrinsics, extrinsics, objects) |
+| `{stem}.txt` | YOLO label (only when present on disk) |
+
+Use `compress=True` to write `.tar.gz` shards (saves ~30–50 % storage, small CPU overhead at load time).
+
+### Load shards with WebDataset
+
+```python
+import webdataset as wds
+
+dataset = (
+    wds.WebDataset("shards/shard-{000000..000009}.tar")
+    .decode("rgb8")            # decode PNG → uint8 numpy [H,W,3]
+    .to_tuple("png", "json")   # select per-sample keys
+)
+
+for img, meta_bytes in dataset:
+    import json
+    meta = json.loads(meta_bytes)
+    print(img.shape, meta["frame_id"])
+```
+
+### Shard sizing guidance
+
+| `frames_per_shard` | Use case |
+|--------------------|----------|
+| `1000` | GPU / multi-node training (shards ~200–500 MB at 1280×720) |
+| `100` | Local debugging, fast iteration |
+| `50` | CI smoke tests |
+
+---
+
 ## Sharding
 
 Distributed renders use global frame indices in filenames (`frame_0123` → \(g=123\)). Merge COCO with:

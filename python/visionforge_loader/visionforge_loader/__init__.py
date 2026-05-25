@@ -9,6 +9,7 @@ from visionforge_loader.geometry import (
     project_world_to_pixel,
     unproject_pixel_ray_direction_cam,
 )
+from visionforge_loader.webdataset_export import to_webdataset
 
 __all__ = [
     "VisionForgeDataset",
@@ -19,4 +20,5 @@ __all__ = [
     "unproject_pixel_ray_direction_cam",
     "backproject_depth_to_world",
     "instance_id_to_class_id",
+    "to_webdataset",
 ]

@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+streaming = ["webdataset>=0.2"]
 
 [project.scripts]
 visionforge-projection-smoke = "visionforge_loader.cli_projection_smoke:main"
