@@ -4,6 +4,39 @@
 
 ---
 
+## Quick Start
+
+```bash
+# Clone and build
+git clone <repo-url> VisionForge && cd VisionForge
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DVISIONFORGE_OMP=ON
+cmake --build build --parallel
+
+# Verify the full pipeline end-to-end
+bash scripts/smoke_test.sh
+```
+
+`smoke_test.sh` builds the project, runs all C++ unit tests, generates a minimal forge and scenario dataset, validates the outputs, and runs the Python test suite. Exit 0 = everything works.
+
+---
+
+## Output Format
+
+All per-frame outputs share the same stem (`frame_NNNN` for forge, `sfrm_NNNN` for scenario) and are written into `train/` or `val/` sub-directories determined by `train_split`.
+
+| Channel | File | Type | Description |
+|---|---|---|---|
+| `rgb` | `frame_NNNN.png` | uint8 RGB | Tone-mapped ACES render |
+| `depth` | `*_spatial.exr` → `Depth` | float32 | Linear camera-space distance (m); `1e30` for sky/miss |
+| `normal` | `*_spatial.exr` → `Normal.X/Y/Z` | float32 | World-space surface normal |
+| `instance_id` | `*_spatial.exr` → `InstanceID` | float32 | Per-pixel instance integer (exact for ids ≤ 16 777 215) |
+| `flow` | `*_spatial.exr` → `flow.x/y` | float32 | Screen-space optical flow (pixels); zero on first frame |
+| `pose` | `*_meta.json` | JSON | `c2w` 4×4, `fx/fy/cx/cy`, `objects[]` with instance ids |
+| `bbox_yolo` | `frame_NNNN.txt` | text | YOLO normalized `cx cy w h` per line |
+| `bbox_coco` | `annotations_coco.json` | JSON | COCO format with per-instance `instance_id` |
+
+---
+
 ## Highlights
 
 * **Cook-Torrance PBR** with GGX microfacet distribution, Fresnel-Schlick approximation, and importance-sampled specular lobes
